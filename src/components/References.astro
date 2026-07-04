@@ -1,0 +1,49 @@
+---
+import { getAllCitations } from "../utils/citeRegistry";
+
+const items = getAllCitations();
+---
+
+{items.length > 0 && (
+<section class="references">
+    <ol>
+        {items.map(({ number, citation }) => (
+                <li id={`ref-${number}`}>
+                    {citation.author ? `${citation.author}. ` : ""}
+                    {citation.date
+                      ? `(${citation.date})`
+                      : citation.year
+                      ? `(${citation.year})`
+                      : null}
+                    {citation.title ? `${citation.title}. ` : ""}
+                    {citation.publisher ? `${citation.publisher}. ` : ""}
+
+                    {citation.url && (
+                            <a href={citation.url} target="_blank" rel="noreferrer">
+                                {citation.url}
+                            </a>
+                    )}
+
+                    {citation.archive && (
+                            <>
+                                {" "}
+                                <a href={citation.archive} target="_blank" rel="noreferrer">
+                                    (Archived)
+                                </a>
+                            </>
+                    )}
+                </li>
+        ))}
+    </ol>
+</section>
+    )}
+
+<style>
+    .references ol {
+        padding-left: 1.25rem;
+    }
+
+    .references li {
+        margin: 0.5rem 0;
+    }
+</style>

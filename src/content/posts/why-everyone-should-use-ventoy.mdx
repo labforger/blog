@@ -1,0 +1,62 @@
+---
+title: Why Everyone Should Use Ventoy
+date: 2026-03-04
+time:
+tags:
+  - software
+  - tools
+hideCoverImage: false
+hideTOC: true
+targetKeyword: ventoy
+draft: true
+
+credits:
+    authors:
+        - name: "Anthony Provenza"
+          url: "https://www.linkedin.com/in/anthonyprovenza/"
+    editors:
+        - name: "Jade Rose"
+          url: "https://www.linkedin.com/in/jade-rosey/"
+---
+import Cite from "../../components/Cite.astro";
+import References from "../../components/References.astro";
+import { resetCitations } from "../../utils/citeRegistry";
+
+{resetCitations()}
+
+
+If you work with computers then you already know the struggle.
+
+You've got your USB stick with one OS on it, and now you need a different one. Tomorrow, you'll probably need the original one back again.
+¦
+So you open Rufus (for the tenth time today) and wait while it painstakingly rewrites the drive.
+
+And in the meantime you've got plenty of time to contemplate every decision that led you here.
+
+You could walk around with a half dozen USB sticks, one for each OS you might need.
+
+Or you could use Ventoy.
+
+## A USB Drive That Boots Everything
+
+Ventoy is a tool that turns a single USB stick into a multi-boot launcher for ISO files. You install it once, copy ISO files onto it and then boot directly from the USB like normal. That's it. No progress bars. No Rufus. And no rewrites.
+
+And Ventoy doesn't care what you're booting. A Windows installer? Copy the ISO. Ubuntu Server? Copy the ISO. Proxmox? Copy the ISO. Firmware updater, recovery disk, live environment, diagnostics tool -- well, you get the idea.
+
+When you boot from the drive, Ventoy scans for ISO files and presents them in a menu. You choose what you want, and it boots it directly. No formatting the drive. No wiping the previous OS. No starting from scratch every time.
+
+## How This Changes the Workflow
+
+Ventoy sounds simple. Because it is. And that's the beauty of it.
+
+Sure, re-imaging a USB drive only takes a few minutes and that's not a lot. But when you're doing it multiple times a week -- testing a new distro, reinstalling something you broke in the lab, flashing a different version of Windows -- those minutes gradually add up to hours.
+
+More important than just the time is the interruption. You're in the middle of something: troubleshooting, testing, rebuilding, and suddenly you have to drop everything and prepare the USB drive again. This can kill momentum on the spot. Even if it's a small inconvenience, it can be just enough friction to pull you out of the task.
+
+The best way I've found to avoid that disruption is to keep several ISOs ready on my Ventoy stick, ready for whenever I might need them.
+
+I keep a 128GB stick with everything I regularly use: Windows 11, Ubuntu Server, Proxmox VE, Kali, a couple of firmware utilities and diagnostic tools. If I need something new, I drop it on there and if I don't need it anymore, I remove it. I don’t think about what's on the drive anymore. I just boot it and choose what I need.
+
+The only downside I've found to this setup is leaving the USB stick at my mum's house. That one's on me.
+
+So if you're still rewriting USBs every time you need a different ISO, stop. Install Ventoy once and stop thinking about it.

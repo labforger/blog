@@ -1,0 +1,55 @@
+---
+import { cite } from "../utils/citeRegistry";
+
+const props = Astro.props as {
+    // anything you want to include in the dedupe signature:
+    author?: string;
+    title?: string;
+    year?: number;
+    date?: string;  // Full date in the format yyyy-mm-dd
+    url?: string;
+    archive?: string;
+    doi?: string;
+    journal?: string;
+    publisher?: string;
+
+    // locator (often excluded from dedupe):
+    pin?: string;
+
+    // optional: link target id at the bottom
+    id?: string;
+
+    archiveMode?: "required" | "optional";
+};
+
+
+const {
+    url,
+    archive,
+    title,
+    archiveMode = "required",
+} = props;
+
+
+if (import.meta.env.DEV && url && !archive && archiveMode === "required") {
+    console.warn(
+        "\x1b[33m%s\x1b[0m",
+        `[Cite] Missing archive (required): ${title ?? "(untitled)"} — ${url}`
+    );
+}
+
+const n = cite(props);
+---
+
+<span class="cite"><a href={`#ref-${n}`}>[{n}]</a></span><style>
+    .cite {
+        font-size: 0.75em;
+        vertical-align: super;
+        line-height: 0;        /* prevents line-height expansion */
+        //margin: 0 -0.4ch 0 -0.2ch;
+        white-space: nowrap;
+        //display: inline-block;
+    }
+    .cite a { text-decoration: none; }
+    .cite a:hover { text-decoration: underline; cursor: pointer; }
+</style>

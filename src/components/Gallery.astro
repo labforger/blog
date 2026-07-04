@@ -1,0 +1,332 @@
+---
+const { images = [], collectionPath } = Astro.props;
+
+const contentBase = collectionPath
+    ?.replace(/^src[\/\\]content[\/\\]/, "")
+    ?.replace(/\\/g, "/") || "";
+
+function normaliseObsidianLink(input: string) {
+
+    let str = String(input ?? "").trim();
+
+    const match = str.match(/^!?\[\[([\s\S]+?)\]\]$/);
+    if (match) {
+        str = match[1].trim();
+
+        const pipeIndex = str.indexOf("|");
+        if (pipeIndex !== -1) {
+            str = str.slice(0, pipeIndex).trim();
+        }
+    }
+
+    if (!str.includes("/")) {
+        str = `${Astro.url.pathname}/${str}`;
+    }
+
+    str = str.replace(/^\.\//, "");
+
+    return str;
+}
+
+function ensureLeadingSlash(p: string) {
+    if (p.startsWith("/")) {
+        return p;
+    } else {
+        return `/${p}`
+    }
+}
+
+const pageDir = Astro.url.pathname.replace(/\/[^\/]*$/, "/");
+
+function toPublicWebpPath(raw: string) {
+    let p = normaliseObsidianLink(raw);
+
+    // strip query/hash
+    p = p.split("#")[0].split("?")[0].trim();
+
+    // ignore remote URLs
+    if (/^https?:\/\//i.test(p)) return p;
+
+    // if it's just "filename.jpg" or "filename" (no slash), make it relative to the current page folder
+    if (!p.includes("/")) {
+        p = pageDir + p;
+    }
+
+    // replace extension with .webp (or add it)
+    if (!p.toLowerCase().endsWith(".webp")) {
+        p = p.replace(/\.(jpe?g|png|gif|tiff?)$/i, "");
+        if (!p.toLowerCase().endsWith(".webp")) p += ".webp";
+    }
+
+    return ensureLeadingSlash(p);
+}
+---
+
+<div class="gallery" data-gallery>
+    <button class="nav prev" type="button" aria-label="Previous">&lsaquo;</button>
+
+    <div class="viewport">
+        {images.map((img, idx) => {
+            const src = typeof img === "string" ? img : img.src;
+            const alt = typeof img === "string" ? "" : (img.alt ?? "");
+            const hotspots = typeof img === "string" ? [] : (img.hotspots ?? []);
+
+            return (
+                    <div class={`slideWrap ${idx === 0 ? "is-active" : ""}`} data-slide={idx}>
+                        <img
+                                class="slideImg do-not-collect"
+                                src={toPublicWebpPath(src)}
+                                alt={alt}
+                                loading={idx === 0 ? "eager" : "lazy"}
+                        />
+
+                        {/* Hotspots for THIS slide */}
+                        <div class="hotspots">
+                            {hotspots.map((hs) => (
+                                    <button
+                                            type="button"
+                                            class="hotspot"
+                                            style={`
+                                    left:${hs.x}%;
+                                    top:${hs.y}%;
+                                    width:${hs.w}%;
+                                    height:${hs.h}%;
+                                    --hs-color:${hs.color ?? 'currentColor'};
+                                `}
+                                            data-content={hs.content ?? ""}
+                                            aria-label="Hotspot"
+                                    >
+                                        <div class="tooltip" hidden></div>
+                                    </button>
+                            ))}
+                        </div>
+
+                        {/* Tooltip for THIS slide */}
+                        <!--<div class="tooltip" hidden></div>-->
+                    </div>
+            );
+        })}
+    </div>
+
+    <button class="nav next" type="button" aria-label="Next">&rsaquo;</button>
+
+    <div class="dots" aria-label="Slide navigation">
+        {images.map((_, i) => (
+                <button
+                        type="button"
+                        class={`dot ${i === 0 ? "is-active" : ""}`}
+                        aria-label={`Go to slide ${i + 1}`}
+                        data-dot={i}
+                />
+        ))}
+    </div>
+
+    <script is:inline>
+        (() => {
+            const gallery = document.currentScript?.closest?.("[data-gallery]");
+            if (!gallery) return;
+
+            const wraps = Array.from(gallery.querySelectorAll(".slideWrap"));
+            const dots = Array.from(gallery.querySelectorAll(".dot"));
+            const prev = gallery.querySelector(".prev");
+            const next = gallery.querySelector(".next");
+
+            // Recompute when the active image loads (first render + lazy images)
+            wraps.forEach((wrap, idx) => {
+                const img = wrap.querySelector(".slideImg");
+                if (!img) return;
+                img.addEventListener("load", () => {
+                    if (idx === i) updateImageBoxForActiveSlide();
+                });
+            });
+
+            // Recompute on resize
+            window.addEventListener("resize", () => updateImageBoxForActiveSlide());
+
+            if (!wraps.length) return;
+
+            let i = 0;
+
+            const set = (n) => {
+                i = (n + wraps.length) % wraps.length;
+                wraps.forEach((w, idx) => w.classList.toggle("is-active", idx === i));
+                dots.forEach((d, idx) => d.classList.toggle("is-active", idx === i));
+            };
+
+            prev?.addEventListener("click", () => set(i - 1));
+            next?.addEventListener("click", () => set(i + 1));
+            dots.forEach((d) => d.addEventListener("click", () => set(Number(d.dataset.dot))));
+
+            // Tooltip behavior (hover)
+            const parseMarkdown = (md) => {
+                return String(md ?? "")
+                    .replace(/^### (.*$)/gim, "<h3 style='margin:0 0 6px;font-size:14px'>$1</h3>")
+                    .replace(/\*\*(.*?)\*\*/gim, "<strong>$1</strong>")
+                    .replace(/\n/g, "<br>");
+            };
+
+            wraps.forEach((wrap) => {
+                wrap.querySelectorAll(".hotspot").forEach((hs) => {
+                    const tooltip = hs.querySelector(".tooltip");
+                    if (!tooltip) return;
+
+                    hs.addEventListener("mouseenter", () => {
+                        tooltip.innerHTML = parseMarkdown(hs.dataset.content);
+                        tooltip.hidden = false;
+                    });
+
+                    hs.addEventListener("mouseleave", () => {
+                        tooltip.hidden = true;
+                        tooltip.innerHTML = "";
+                    });
+                });
+            });
+
+            set(0);
+
+            function updateImageBoxForActiveSlide() {
+                const wrap = wraps[i];
+                if (!wrap) return;
+
+                const img = wrap.querySelector(".slideImg");
+                if (!img) return;
+
+                const viewport = gallery.querySelector(".viewport")?.getBoundingClientRect();
+                if (!viewport) return;
+
+                const vw = viewport.width;
+                const vh = viewport.height;
+
+                const nw = img.naturalWidth;
+                const nh = img.naturalHeight;
+                if (!nw || !nh) return;
+
+                const scale = Math.min(vw / nw, vh / nh);
+                const rw = nw * scale;
+                const rh = nh * scale;
+
+                const left = (vw - rw) / 2;
+                const top = (vh - rh) / 2;
+
+                wrap.style.setProperty("--img-left", `${left}px`);
+                wrap.style.setProperty("--img-top", `${top}px`);
+                wrap.style.setProperty("--img-w", `${rw}px`);
+                wrap.style.setProperty("--img-h", `${rh}px`);
+            }
+
+            updateImageBoxForActiveSlide();
+        })();
+    </script>
+</div>
+
+<style>
+    .gallery {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        grid-template-rows: auto auto;
+        gap: 10px;
+        align-items: center;
+    }
+
+    .viewport {
+        grid-column: 2;
+        border-radius: 12px;
+        aspect-ratio: 16 / 9;
+        background: transparent;
+        position: relative;
+        overflow: visible
+    }
+
+    /* Each slide is a stacked layer */
+    .slideWrap {
+        position: absolute;
+        inset: 0;
+        display: none;
+    }
+    .slideWrap.is-active {
+        display: block;
+    }
+
+    .slideImg {
+        width: 100%;
+        height: 100%;
+        margin: 0 !important;
+        object-fit: contain;
+        object-position: center;
+        display: block;
+    }
+
+    .nav {
+        border: 0;
+        background: transparent;
+        font-size: 28px;
+        cursor: pointer;
+        opacity: 0.85;
+    }
+    .nav:hover { opacity: 1; }
+
+    .dots {
+        grid-column: 1 / -1;
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        padding-top: 4px;
+    }
+
+    .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        border: 0;
+        background: currentColor;
+        opacity: 0.3;
+        cursor: pointer;
+    }
+    .dot.is-active {
+        opacity: 1;
+        transform: scale(1.15);
+    }
+
+    /* Hotspots */
+    .hotspots {
+        position: absolute;
+        pointer-events: none;
+        left: var(--img-left, 0px);
+        top: var(--img-top, 0px);
+        width: var(--img-w, 100%);
+        height: var(--img-h, 100%);
+    }
+
+
+    .hotspot {
+        pointer-events: auto;
+        position: absolute;
+        border: 1px solid var(--hs-color, currentColor);
+        border-radius: 6px;
+        cursor: pointer;
+        padding: 0;
+    }
+
+    .hotspot:hover {
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .tooltip {
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%) translateY(-8px);
+
+        padding: 0.2em 0.5em;
+        border-radius: 10px;
+        background: rgba(0,0,0,0.85);
+        color: white;
+        font-size: 14px;
+        float: left;
+        width: max-content;
+        max-width: 400px;
+
+        pointer-events: none;
+        z-index: 1000;
+    }
+</style>

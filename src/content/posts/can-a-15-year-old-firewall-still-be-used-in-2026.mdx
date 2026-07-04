@@ -1,0 +1,271 @@
+---
+title: Can a 15 Year Old Firewall Appliance Still be Used in 2026?
+description:
+date: 2026-07-04
+tags:
+  - networking
+  - opnsense
+  - homelab
+  - hardware
+hideCoverImage: false
+hideTOC: true
+targetKeyword: ventoy
+draft: false
+
+credits:
+    authors:
+        - name: "Anthony Provenza"
+          url: "https://www.linkedin.com/in/anthonyprovenza/"
+    editors:
+        - name: "Jade Rose"
+          url: "https://www.linkedin.com/in/jade-rosey/"
+---
+import Cite from "../../components/Cite.astro";
+import References from "../../components/References.astro";
+import { resetCitations } from "../../utils/citeRegistry";
+
+{resetCitations()}
+
+The listing described it as a "fully working enterprise firewall appliance", which is technically true in the same way that when I sold my last car it was "fully working" -- as long as you ignored the dashboard having more lights than Times Square.
+
+But for £40, it was hard to pass up the opportunity to get my hands on another piece of hardware I'd never worked with before.
+
+I've also been slightly obsessed with OPNsense recently. Well, I say recently but it's actually been almost a year since I discovered it and since then it's become the foundation of my homelab.
+
+So naturally this raised the question: could this ageing firewall appliance be repurposed to run OPNsense and have a place in a modern network?
+
+
+## What is OPNsense?
+
+If you've never heard of OPNsense before then you're probably wondering "Anthony, what the _@#$%_ is that?" and that's a very fair question.
+
+In short, it's a free open source firewall operating system, that can be installed on a surprisingly wide range of hardware, whether that's a purpose-built enterprise appliance (like this one), a retired office PC or even a tiny fanless box. If you can install an operating system, then you can install OPNsense. And it becomes the gateway to your entire network.
+
+It can handle everything from VLANs to VPNs, and from DHCP to DNS, all through a (mostly) polished web interface. In short, if there's a networking acronym, there's a good chance OPNsense supports it.
+
+And best of all, it's completely free.
+
+So the question wasn't whether OPNsense could do the job.
+
+It was whether fifteen-year-old hardware could keep up.
+
+
+## Let's Find Out
+
+The first thing I did after cracking it open was remove the original hard drive and put it to the side. Partly because spinning disk boot drives feel very 2010s, but mostly because I didn't want to lose the original OS installation.
+
+To replace it, I bought the cheapest SATA SSD I could find on Amazon with at least 100 GB of capacity and next-day delivery simply because three digit size feels better than two. Very scientific.
+
+Once it arrived, I noticed a fairly obvious oversight: the drive caddy was designed for a 3.5" hard drive, and I had bought a 2.5" SSD.
+
+Yeah. That probably would have been a good thing to check beforehand, but I got a bit overexcited.
+
+Luckily, Velcro tape and I are very familiar with each other these days, considering half the equipment in my office appears to be attached with it. So the SSD was mounted using the highly advanced "that’s probably not going anywhere" method. A gentle wiggle later, and I was convinced.
+
+Then I realised the one tiny flaw in my plan: I had just spent an afternoon upgrading a firewall without first confirming it wasn't completely dead. At that point there wasn't much to do besides keep going and hope for the best. Besides, I'd already committed to the Velcro.
+
+I'm sure every tech person collects cables like they're Pokémon cards. Somehow, despite owning two IKEA Kallax boxes full of them, I couldn't find a VGA cable. Just my luck.
+
+A short trip to Currys later, armed with my new £12.99 cable and the same unjustified optimism as before, I was finally ready to find out if this thing had any life left in it.
+
+
+## Plugging it in
+
+As soon as I flicked the switch, the device roared to life. If nothing else, I knew it was going to be an enterprise-grade white noise generator.
+
+A few seconds later the screen offered me two choices:
+- `F1` to continue
+- `DEL` to enter setup
+
+Naturally, I picked the wrong one.
+
+Now before you judge me, my reasoning was perfectly sound in my head: I wanted to install an OS, so surely I needed to go into the BIOS first.
+
+I made sure the USB drive was at the top of the boot order, saved my changes and confidently exited. A few moments later, I was presented with the exact same screen I had started with.
+
+Maybe the `F1` wasn't just there for decoration.
+
+This time I let the appliance continue booting and within a few seconds I was looking at my Ventoy menu.
+
+I selected OPNsense from the list, thinking to myself:
+
+> _"It can't possibly be this easy."_
+
+Unfortunately, I was right. Instead of an installer, I was greeted with three very unhelpful words:
+
+```
+Invalid partition table
+```
+
+Enter did nothing.
+
+Escape did nothing.
+
+After exhausting the full extent of my troubleshooting skills, I reached around the back and flicked the power switch.
+
+Luckily, this isn't the first time I've had problems booting OPNsense off that particular USB stick. I'd had the exact same problem when setting up my own home firewall, and writing the img to a fresh USB stick solved it.
+
+To my surprise, this time I was launched straight to the OPNsense menu.
+
+After logging in with the default credentials, I moved on to assigning the network interfaces. I was expecting at least some compatibility issues. Surely Sophos hadn't built an appliance with eight ethernet ports that just worked with a completely different operating system.
+
+Turns out, that's exactly what they'd done.
+
+No hunting for drivers. No unsupported hardware. They just... worked?
+
+In hindsight, I probably shouldn't have been so surprised. The front panel proudly advertises them as 10/100/1000 PCIe interfaces. And why would they want to reinvent the wheel?
+
+
+# Accessing the Internet
+
+I assigned the connection to my switch as the WAN, and the cable leading to my laptop as the LAN.
+
+Things were going smoothly. A little bit too smoothly, I thought.
+
+So it was time to test the internet connection by pinging `8.8.8.8`.
+
+Laptop to `8.8.8.8`? Nothing.
+
+OPNsense to `8.8.8.8`? Also nothing.
+
+So maybe it wasn't as smooth as I had thought.
+
+Looking at the console, the problem became immediately obvious: The UTM had given itself 192.168.1.1.
+
+Unfortunately, so had my actual firewall.
+
+Two routers.
+
+One IP address.
+
+What could possibly go wrong?
+
+Luckily, this was an easy one to fix. I switched the WAN interface to use DHCP and all of a sudden it had the IP `192.168.1.157`, which was a lot more promising.
+
+But the laptop still had no Internet access. And the UTM still couldn't reach the Internet.
+
+At least packets were making it onto the firewall. Renewing the DHCP lease caused the laptop to appear in pftop, so something was definitely happening.
+
+
+## Installing the OS
+
+While trying to access the web interface for some more debugging, I realised something I'd completely overlooked:
+
+I wasn't running the installed operating system at all.
+
+I'd been configuring the live environment from the USB stick.
+
+Even if I fixed the networking and got everything perfect, as soon as I reboot it would all be wiped anyway.
+
+So, before chasing any more networking problems, I finally did the thing I'd intended to do in the first place and actually installed OPNsense.
+
+During installation I was greeted by a warning that OPNsense recommends at least 3 GB of RAM.
+
+The UTM, on the other hand, has a generous 2 GB.
+
+I decided this sounded more like a gentle suggestion rather than a requirement and carried on regardless.
+
+A few minutes later the installer completed successfully. I removed the USB stick, rebooted the appliance and held my breath.
+
+It booted straight back into OPNsense.
+
+Finally, something had worked first time.
+
+After reassigning the WAN and LAN interfaces for a second time, I connected to the web interface and completed the setup wizard.
+
+A few seconds later, my laptop had Internet access.
+
+Progress.
+
+
+# Two Firewalls, One Problem
+
+With Internet access finally working, it was time to test traffic passing through the firewall on to my home network. Except there was one glaring issue:
+
+It didn't pass through the firewall.
+
+After more troubleshooting than I'm willing to admit, I realised I'd made a fairly fundamental mistake.
+
+I'd configured both my home network and my UTM network with the same subnet of `192.168.1.0/24`.
+
+That probably should've been my first clue.
+
+After changing the UTM to use `192.168.10.0/24` (and updating the DHCP server with the new range), I renewed the lease on my laptop and confidently tried again.
+
+Still nothing.
+
+Traceroute reached the UTM and stopped.
+
+At this point I was convinced my home firewall was dropping the packets. Looking back, that doesn't even make sense.
+
+In hindsight, it should have been obvious. My desktop lived on the same subnet as the UTM's WAN interface. If the UTM wanted to reach `192.168.1.156`, it would ARP for the address directly. The traffic never needed to pass through my main firewall in the first place.
+
+So I kept investigating.
+
+ARP looked correct. The routing table looked correct.
+
+After far too much Googling, I had found the issue: Windows had decided to classify my desktop's ethernet connection as being a public network. I had previously disabled Windows Defender Firewall on private networks so I could test this but the public profile was still dropping every packet.
+
+The fix took seconds.
+
+I disabled the firewall on public networks and suddenly the pings were bouncing between both displays.
+
+I had successfully spent the better part of an hour debugging one firewall because of another firewall.
+
+
+# Peak 2011 Performance
+
+With all the networking finally behaving itself (through absolutely no fault of my own, of course), I thought it was time to finally figure out how much life a fifteen-year-old Intel Atom E1500 still holds.
+
+The answer surprised me.
+
+Running a simple Speedtest from my laptop pushed CPU utilisation to around 35%. Considering this is a dual-core 2.2 GHz processor from 2011 running a much newer operating system than it was ever designed for, I honestly expected worse.
+
+Of course, one laptop running a Speedtest isn't exactly representative of a busy network.
+
+I fired up `iperf3` between my laptop and desktop to see how the UTM coped with sustained traffic flowing through the firewall.
+
+Most of the time CPU usage sat somewhere around 20–30%, although it occasionally spiked into the 90% range. Not bad for a £40 rack mount appliance.
+
+Naturally, I wanted to push it more.
+
+I installed `iperf3` directly on the UTM and hammered the connection for sixty seconds while simultaneously trying to watch a 4K YouTube video from my laptop.
+
+That finally made the little Atom sweat.
+
+CPU utilisation rarely dropped below 60%, frequently peaked at 99%, and the YouTube stream became noticeably less cooperative whenever I skipped around the timeline.
+
+At first, I blamed the processor. Then I realised I'd accidentally created a different bottleneck.
+
+`iperf3` was already consuming roughly 900 Mbps of the available gigabit link, leaving very little bandwidth for anything else. The CPU was certainly working hard, but the buffering wasn't entirely its fault.
+
+
+# The Verdict
+
+When all was said and done, I was pleasantly surprised by how well this thing held up.
+
+This little appliance is fifteen years old, has just 2 GB of RAM and is powered by an Intel Atom processor that predates the Raspberry Pi. Despite that, it installed OPNsense without complaint and handled the workloads I threw at it.
+
+Is it fast? No.
+
+Is it quiet? Also no.
+
+But is it doing what I wanted it to? Absolutely.
+
+I suppose it all boils down to one question: Would I do it again?
+
+Without hesitation.
+
+For around £40, this is a surprisingly accessible way to learn OPNsense and use it on a real network. If you've already got a rack, it slides right into a 1U slot. After all, there aren't many affordable rack-mount appliances that will happily run OPNsense straight out of the box.
+
+The only thing stopping me from replacing my Protectli with it full time is the noise. I can hear this thing from the other side of my apartment, which isn't ideal when your desk is only about five feet away from the rack.
+
+I suspect replacing the fans with quieter alternatives would make a noticeable difference, although that's a project for another day.
+
+Then again, my Protectli also cost around five times as much, so maybe comparing the two isn't entirely fair.
+
+If you're deciding between buying a purpose-built appliance like a Protectli and building your own N100 firewall from scratch, I think this sits in a really interesting middle ground.
+
+It's inexpensive, surprisingly capable, and perhaps most importantly, it makes a fun weekend project to tinker with. If your goal is to learn OPNsense rather than build the world's fastest firewall, I think this appliance is hard to beat for the money.
+
+At the end of the day, not all projects need blazing fast hardware. Sometimes giving old hardware a second life is far more satisfying than buying something new.
