@@ -1,0 +1,131 @@
+---
+title: I Can't Remember Four Numbers
+description:
+date: 2026-07-09
+time:
+tags:
+  - Homelab
+  - Networking
+  - OPNsense
+  - DNS
+hideCoverImage: false
+hideTOC: true
+targetKeyword: Internal DNS
+draft: false
+
+credits:
+    authors:
+        - name: "Anthony Provenza"
+          url: "https://www.linkedin.com/in/anthonyprovenza/"
+    editors:
+        - name: "Jade Rose"
+          url: "https://www.linkedin.com/in/jade-rosey/"
+---
+import Cite from "../../components/Cite.astro";
+import References from "../../components/References.astro";
+import { resetCitations } from "../../utils/citeRegistry";
+
+{resetCitations()}
+
+Okay, the title is a bit misleading.
+
+I promise I can remember four individual numbers. Probably.
+
+The problem starts when I have to remember four numbers for every device I need to configure, monitor, or repair after I inevitably break something while doing the first two.
+
+At first, IP addresses are fine. You have a firewall, maybe a switch, a server, and your brain confidently goes "Don't worry, we've got this."
+
+Well it turns out your brain lied to you. Just like that time in school when it said confessing to your crush was a good idea.
+
+It wasn't.
+
+And much like the rest of that school year, things went from confident to uncomfortable in record time.
+
+One IP address is easy. Two is manageable. After that, I'm basically rolling the dice.
+
+So naturally, I considered a few highly professional solutions.
+
+
+## Potential Solutions
+
+**Write the IP addresses on a Post-it note.**
+Great idea, if only reading my handwriting wasn't like deciphering hieroglyphics.
+
+**Write a note on my PC.**
+Also great, until I want to configure my switch from bed because apparently that's my idea of fun.
+
+**Write it in my cloud notes.**
+Sensible, until I break the network and the only place I wrote the firewall IP address is somewhere I can no longer reach.
+
+**Set up internal DNS.**
+Bingo.
+
+
+## The Bit I Hadn't Connected (no pun intended)
+
+My understanding of DNS was basically this: domain name goes in and IP address comes out.
+
+Somewhere out there, the internet's version of a phonebook did its thing, and I was happy not to ask too many questions.
+
+What I didn't realise was that I could keep my own copy and scribble in the margins.
+
+Devices on my network would check that copy first. If OPNsense had an answer, it gave that answer. If not, DNS carried on like normal.
+
+That was the part I hadn't properly connected before. I knew OPNsense could handle DNS for the network, and I knew it could cache or forward queries to other resolvers.
+
+What I'd never thought about was overriding records locally: telling my DNS server "when someone asks for this, give them this internal address."
+
+
+## Setting It Up
+
+Honestly, setting it up was so much simpler than I was expecting. It was just like configuring DNS records on the web, except these ones only apply locally.
+
+My OPNsense box was already my DHCP server, and it was handing out its own address as the DNS server. Unbound DNS was also running, so half the job was already done for me. Thank you, past Anthony, for doing it right.
+
+So all I had to do was teach it a few internal names.
+
+I added a host override for `fw.home.labforger.com` and pointed it to the OPNsense LAN IP.
+
+I opened Chrome, typed in the URL, and that was it, right?
+
+Not quite. Because nothing ever works first time for me.
+
+I was greeted with this message:
+
+```
+A potential DNS Rebind attack has been detected.
+Try to access the router by IP address instead of by hostname. You can disable this check if needed under System: Settings: Administration.
+```
+
+Honestly, good on them for adding the extra security. But it doesn't make it any less annoying.
+
+The fix was pretty much exactly what the message suggested: access OPNsense by IP address, open the administration settings, and add the new hostname to the list of alternate hostnames.
+
+A quick refresh, and done.
+
+
+## Was It Worth It?
+
+Yes.
+
+After getting `fw.home.labforger.com` to work, I added my managed switch and both access points as well.
+
+At the moment, I don't have many devices to add. I recently sold my larger servers to downsize the lab, so it's not quite a data centre anymore. It's more like a pile of odd networking equipment I managed to get a bargain on from eBay.
+
+But that's kind of the point.
+
+Spending 20 minutes on this now means I can keep building on it later. As my lab grows, my local DNS records can grow with it, and I can stop trying to remember which IP address belongs to which box.
+
+It definitely doesn't make the network any more flashy or faster. Actually, if anything it's technically slower the first time because the DNS lookup has to happen before the connection does. But in practice, you won't notice a difference.
+
+What does matter is that I no longer have to check my DHCP reservations every time I want to configure something.
+
+I also feel a little bit more professional now. The whole lab feels a little bit more intentional.
+
+I like that.
+
+So yeah, in a nutshell: this is probably one of the best upgrades I could have made when comparing time spent to usefulness gained.
+
+Not particularly exciting. Just useful.
+
+But sometimes those are the best upgrades.
