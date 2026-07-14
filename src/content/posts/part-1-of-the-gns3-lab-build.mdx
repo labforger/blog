@@ -1,0 +1,192 @@
+---
+title: "Part 1 of the GNS3 Lab Build: Building the Proxmox Server"
+description:
+date: 2026-07-14
+time:
+tags:
+  - Homelab
+  - Networking
+  - Proxmox
+  - GNS3
+hideCoverImage: false
+hideTOC: true
+targetKeyword: Internal DNS
+draft: false
+
+credits:
+    authors:
+        - name: "Anthony Provenza"
+          url: "https://www.linkedin.com/in/anthonyprovenza/"
+    editors:
+        - name: "Jade Rose"
+          url: "https://www.linkedin.com/in/jade-rosey/"
+---
+import Cite from "../../components/Cite.astro";
+import References from "../../components/References.astro";
+import { resetCitations } from "../../utils/citeRegistry";
+
+{resetCitations()}
+
+I really like the idea of being able to break a network from anywhere.
+
+Not a real network, obviously. Apparently that's frowned upon.
+
+But a virtual one? Perfectly acceptable. In fact, some might even say educational.
+
+That's the main reason I wanted to make my own dedicated GNS3 server. I don't like the idea of having my labs trapped on whatever device I happen to be using that day. Sometimes I'm on my desktop. Sometimes I'm on my laptop. And sometimes I want to connect through my VPN and poke at something while I'm not even at home.
+
+If the lab lives on my desktop, then it's only accessible when I'm sitting at my desktop.
+
+But with a dedicated server, I can access it whenever I want.
+
+So GNS3 needed its own home.
+
+A few months earlier, I had bought a Dell Optiplex 7050 small form factor (SFF). For only £60, I got a pretty decent machine:
+- Intel&reg; Core&trade; i5-7500, 4 cores, 4 threads @ 3.40 GHz, boost up to 3.80 GHz
+- 16 GB DDR4 RAM
+- 256 GB SATA SSD
+
+Honestly, I was already really happy with that. I've seen individual 16 GB RAM kits listed online for over £40, so getting the machine for £60 felt like a bargain.
+
+Of course, knowing me, it didn't stay a £60 machine for long.
+
+
+## The Upgrades
+
+The Optiplex came with a 256 GB SATA SSD and a CD-ROM drive.
+
+I honestly can't remember the last time I actually used a CD drive, but I think it was around ten years ago, burning questionably sourced episodes of _Family Guy_ to watch on a portable DVD player at summer camp.
+
+Anyway, the CD-ROM had to go.
+
+I had a CD-ROM-to-2.5" SATA bay adapter lying around from an old rack server I had upgraded, so I moved the original SSD into this bay. That freed up the main drive bay for something bigger.
+
+The plan was simple: add more storage.
+
+And before you ask why, I'm not too sure myself. I'm sure 256 GB would've been enough to get started, but I also don't want to worry about storage in the future.
+
+I ordered a used 1 TB 3.5" hard drive from eBay for £17.20 along with a drive caddy for £5.99 so I could properly mount it inside the case.
+
+There was just one tiny issue.
+
+I bought a caddy for a Dell Optiplex 7050. Not a Dell Optiplex 7050 *SFF*.
+
+You know when people say the square peg goes in the square hole?
+
+Well, imagine my surprise when the square peg arrived and it was approximately twice the size of the square hole.
+
+Technically I had bought the right part, just for the wrong computer. The listing said 7050, the computer said 7050, and my brain decided there was no need to double-check anything on this occasion.
+
+Maybe I should have double-checked.
+
+So the 1 TB drive was temporarily attached with... drum roll please... Velcro tape.
+
+Because apparently every LabForger project has to involve Velcro tape at some point.
+
+While I had the machine open, I also decided to repaste the CPU.
+
+I have no idea if it had been done since leaving the factory, but when I lifted the heatsink, it looked more like cement than paste. Luckily I already had some paste lying around so I cleaned off the old stuff and applied a fresh layer.
+
+I also got a bit carried away.
+
+As soon as I saw the empty PCIe slots, my brain started thinking of all the ways I could fill them under the excuse of "future proofing."
+
+Eventually, I settled on an Intel I350-T4 four-port NIC.
+
+Did I need four extra Ethernet ports immediately? No.
+
+Did that stop me from doing it? Also no.
+
+
+## The Software
+
+When I originally bought this device, I was in the middle of getting rid of my old Dell servers because you could literally hear them from the other side of my apartment.
+
+This created a small problem.
+
+I still needed somewhere to run my self-hosted services, but I no longer wanted to wake up to the sound of a small jet engine preparing for take-off. The original plan was to install Proxmox and use the Optiplex as a general-purpose homelab server.
+
+That way, instead of dedicating the entire machine to one thing, I could split it into different virtual machines and give each service its own little place to live.
+
+Then I did absolutely nothing with it for over three months.
+
+At that point, I started to wonder if all those self-hosting plans were actually as urgent as I had originally told myself. Since the main thing I wanted was a GNS3 server, I considered skipping Proxmox entirely and just installing Ubuntu Server with GNS3 on top.
+
+Of course, that option was too easy, so back to Proxmox I went.
+
+Lately, I've been thinking it would be useful to have a Grafana dashboard for monitoring, NetBox for IP address management, and maybe some other services later on. Even if GNS3 is the main reason I finally got round to this project, I like knowing I can expand without having to rebuild the server later.
+
+If I'm going to use this Optiplex as the main server for the LabForger homelab, then I might as well future-proof it, even just a little bit.
+
+The main thing that put me off was nested virtualisation.
+
+I was worried that running virtual devices inside GNS3, inside a VM, inside Proxmox would kill performance on a machine that's already not exactly top of the line. In my head, the setup looked something like this:
+
+```
+Proxmox PVE
+├── GNS3 Server
+│   ├── Cisco IOS
+│   ├── MikroTik Cloud Hosted Router (CHR)
+│   ├── OPNsense
+│   ├── Windows & Linux VMs
+│   └── ...
+└── Other VMs
+    └── ...
+```
+
+In my head, it looked like I was planning a disaster and I would be regretting it all in a matter of days.
+
+After doing some research on nested virtualisation, I found [this Proxmox wiki article](https://pve.proxmox.com/wiki/Nested_Virtualization) explaining that the VM's CPU type can be set to `host`. My understanding is that this lets the GNS3 VM use more of the real CPU features from the Optiplex, including the virtualisation support needed for KVM.
+
+This was the important part for me. I didn't want to put GNS3 inside Proxmox if it meant creating performance problems before I'd even started building labs.
+
+The article also says you can check whether nested virtualisation is enabled from the Proxmox shell:
+
+```bash
+root@pve01:~# cat /sys/module/kvm_intel/parameters/nested
+Y
+```
+
+Seeing that `Y` gave me a bit more confidence that I was on the right track.
+
+So the final plan was set: Proxmox on the Optiplex, with GNS3 running inside its own VM.
+
+
+## Installing Proxmox
+
+With the hardware sorted and the plan established, it was time to actually install Proxmox.
+
+The install itself was really simple. I grabbed my Ventoy USB, which already had Proxmox on it, booted the Optiplex from it, selected the install disk, configured the network, set the hostname, and created a root password using my password manager.
+
+Then I went to log in and realised the password was not actually in my password manager.
+
+Turns out, I'd generated the password and then forgotten to press save.
+
+Since this was a completely fresh install, I decided to just reinstall the whole operating system.
+
+Of course I would find a way to make even the simplest task more... interesting.
+
+The second attempt went much better. This time, I made sure the password was actually saved before finishing the install, then logged into the Proxmox web interface from my desktop.
+
+I also took the opportunity to add a DHCP reservation and create another local DNS record for `pve01.home.labforger.com`.
+
+And just like that, the £60 Optiplex was no longer just an old office PC. It was the first proper server in my LabForger homelab.
+
+
+## Was It Worth It?
+
+Yes.
+
+On its own, all I really did was upgrade an old office computer and install an operating system on it. Not exactly groundbreaking.
+
+However, this machine is the foundation for a lot of what I want to build next. Before building everything else on top of it, I think it was worth taking the time to explore my options, both hardware and software, so I could make better decisions for what I actually want this server to do.
+
+Knowing me, that doesn't mean everything is going to be seamless.
+
+But hopefully there'll be fewer bumps along the road.
+
+GNS3 is still the main reason this machine exists, but it definitely won't be the only thing I use it for. Now that Proxmox is set up, I've got the freedom to add whatever else I need later, whether that's monitoring, dashboards, IPAM, or literally anything else I convince myself is essential.
+
+Next step?
+
+Setting up the GNS3 server.
