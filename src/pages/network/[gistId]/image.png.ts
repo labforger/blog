@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { loadGns3Topology } from "../../../components/network-diagram/gns3";
+import { env } from "cloudflare:workers";
 
 export const prerender = false;
 
@@ -35,16 +36,6 @@ const FOOTER = {
 } as const;
 
 type DiagramTheme = "dark" | "light";
-
-interface CloudflareRuntime {
-    env?: {
-        BROWSER?: unknown;
-    };
-}
-
-interface LocalsWithRuntime {
-    runtime?: CloudflareRuntime;
-}
 
 interface BrowserLike {
     newPage(): Promise<PageLike>;
@@ -161,10 +152,8 @@ function getCloudflareBrowserBinding(locals: App.Locals): unknown {
         ?.BROWSER;
 }
 
-async function launchBrowser(
-    locals: App.Locals,
-): Promise<BrowserLike> {
-    const cloudflareBinding = getCloudflareBrowserBinding(locals);
+async function launchBrowser(): Promise<BrowserLike> {
+    const cloudflareBinding = env.BROWSER;
 
     if (cloudflareBinding) {
         const cloudflarePuppeteer = await import("@cloudflare/puppeteer");
@@ -217,7 +206,6 @@ async function validateProject(gistId: string): Promise<void> {
 export const GET: APIRoute = async ({
                                         params,
                                         request,
-                                        locals,
                                     }) => {
     const gistId = params.gistId;
 
@@ -315,7 +303,7 @@ export const GET: APIRoute = async ({
     let browser: BrowserLike | undefined;
 
     try {
-        browser = await launchBrowser(locals);
+        browser = await launchBrowser();
 
         const page = await browser.newPage();
 
@@ -346,7 +334,7 @@ export const GET: APIRoute = async ({
         viewerUrl.searchParams.set("theme", theme);
 
         await page.goto(viewerUrl.href, {
-            waitUntil: "networkidle0",
+            waitUntil: "domcontentloaded",
             timeout: LIMITS.navigationTimeoutMs,
         });
 

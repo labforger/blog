@@ -63,6 +63,7 @@
     "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
+    "@cloudflare/puppeteer": "^1.4.0",
     "@types/hast": "^3.0.4",
     "@types/unist": "^3.0.3",
     "cross-env": "^10.0.0",

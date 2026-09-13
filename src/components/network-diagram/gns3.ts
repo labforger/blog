@@ -1,4 +1,3 @@
-import { strFromU8, unzipSync } from "fflate";
 import type {
     NetworkDrawing,
     NetworkEdge,
@@ -11,8 +10,6 @@ import type {
 
 const DEFAULT_GRID_SIZE = 75;
 const MAX_SOURCE_BYTES = 10 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES = 2_000;
-const MAX_PROJECT_BYTES = 5 * 1024 * 1024;
 const MAX_NODES = 5_000;
 const MAX_LINKS = 20_000;
 const MAX_DRAWINGS = 5_000;
@@ -29,86 +26,9 @@ interface GNS3Project {
 
 type PlainObject = Record<string, unknown>;
 
-interface GitHubGistFile {
-    filename?: string;
-    raw_url?: string;
-}
-
-interface GitHubGistResponse {
-    files?: Record<string, GitHubGistFile>;
-}
-
 const GIST_HOSTS = new Set(["gist.github.com", "www.gist.github.com"]);
 
-function parseGistSource(url: URL): { gistId: string; filename?: string } | undefined {
-    if (!GIST_HOSTS.has(url.hostname.toLowerCase())) return undefined;
-
-    const pathParts = url.pathname.split("/").filter(Boolean);
-    const gistId = pathParts.length >= 2 ? pathParts[1] : pathParts[0];
-
-    if (!gistId || !/^[a-f0-9]+$/i.test(gistId)) {
-        throw new TypeError("The GitHub Gist URL does not contain a valid Gist ID.");
-    }
-
-    const fragment = url.hash
-        ? decodeURIComponent(url.hash.slice(1))
-        : undefined;
-
-    return { gistId, filename: fragment || undefined };
-}
-
-function chooseGistProjectFile(
-    files: Record<string, GitHubGistFile>,
-    requestedFilename?: string,
-): GitHubGistFile {
-    const availableFiles = Object.values(files).filter(
-        (file): file is GitHubGistFile & { filename: string; raw_url: string } =>
-            typeof file.filename === "string" &&
-            typeof file.raw_url === "string",
-    );
-
-    if (requestedFilename) {
-        const githubAnchor = (filename: string) =>
-            `file-${filename.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-
-        const requested = availableFiles.find(
-            (file) =>
-                file.filename === requestedFilename ||
-                githubAnchor(file.filename) === requestedFilename.toLowerCase(),
-        );
-
-        if (requested) return requested;
-
-        // Ignore unrelated page fragments rather than breaking an otherwise
-        // valid one-project Gist URL.
-        if (/\.(?:gns3project|gns3)$/i.test(requestedFilename)) {
-            throw new Error(
-                `The Gist does not contain "${requestedFilename}".`,
-            );
-        }
-    }
-
-    const supported = availableFiles.filter((file) => {
-        const filename = file.filename.toLowerCase();
-        return filename.endsWith(".gns3project") || filename.endsWith(".gns3");
-    });
-
-    if (supported.length === 0) {
-        throw new Error(
-            "This Gist does not contain a .gns3project or .gns3 file.",
-        );
-    }
-
-    if (supported.length > 1) {
-        throw new Error(
-            "This Gist contains multiple GNS3 project files. Add #filename.gns3project to the Gist URL.",
-        );
-    }
-
-    return supported[0];
-}
-
-async function resolveProjectSource(src: string): Promise<string> {
+function resolveProjectSource(src: string): string {
     const sourceUrl = /^https?:\/\//i.test(src)
         ? new URL(src)
         : new URL(
@@ -118,37 +38,23 @@ async function resolveProjectSource(src: string): Promise<string> {
                 : "http://localhost/",
         );
 
-    const gist = parseGistSource(sourceUrl);
+    if (!GIST_HOSTS.has(sourceUrl.hostname.toLowerCase())) {
+        return sourceUrl.href;
+    }
 
-    if (!gist) return sourceUrl.href;
+    const pathParts = sourceUrl.pathname
+        .split("/")
+        .filter(Boolean);
 
-    const response = await fetch(
-        `https://api.github.com/gists/${encodeURIComponent(gist.gistId)}`,
-        {
-            credentials: "omit",
-            headers: {
-                Accept: "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        },
-    );
+    const gistId = pathParts.at(-1);
 
-    if (!response.ok) {
-        throw new Error(
-            `Could not retrieve GitHub Gist (${response.status} ${response.statusText}).`,
+    if (!gistId || !/^[a-f0-9]{5,64}$/i.test(gistId)) {
+        throw new TypeError(
+            "The GitHub Gist URL does not contain a valid Gist ID.",
         );
     }
 
-    const payload = await response.json() as GitHubGistResponse;
-
-    if (!payload.files || !isPlainObject(payload.files)) {
-        throw new TypeError("GitHub returned an invalid Gist response.");
-    }
-
-    return chooseGistProjectFile(
-        payload.files,
-        gist.filename,
-    ).raw_url!;
+    return `https://gist.githubusercontent.com/raw/${gistId}/`;
 }
 
 function isPlainObject(value: unknown): value is PlainObject {
@@ -168,17 +74,6 @@ function asFiniteNumber(value: unknown, fallback = 0): number {
 function asPositiveInteger(value: unknown, fallback: number): number {
     const number = asFiniteNumber(value, fallback);
     return Number.isInteger(number) && number > 0 ? number : fallback;
-}
-
-function isZip(bytes: Uint8Array): boolean {
-    return bytes.length >= 4 &&
-        bytes[0] === 0x50 &&
-        bytes[1] === 0x4b &&
-        (
-            (bytes[2] === 0x03 && bytes[3] === 0x04) ||
-            (bytes[2] === 0x05 && bytes[3] === 0x06) ||
-            (bytes[2] === 0x07 && bytes[3] === 0x08)
-        );
 }
 
 function parseProjectJson(text: string): GNS3Project {
@@ -216,30 +111,6 @@ function parseProjectJson(text: string): GNS3Project {
     }
 
     return parsed as GNS3Project;
-}
-
-function extractProjectJson(bytes: Uint8Array): string {
-    if (!isZip(bytes)) {
-        return new TextDecoder().decode(bytes);
-    }
-
-    const archive = unzipSync(bytes);
-    const names = Object.keys(archive);
-
-    if (names.length > MAX_ARCHIVE_ENTRIES) {
-        throw new RangeError("The GNS3 project archive contains too many files.");
-    }
-
-    const projectFile = archive["project.gns3"];
-    if (!projectFile) {
-        throw new TypeError("The archive does not contain project.gns3 at its root.");
-    }
-
-    if (projectFile.byteLength > MAX_PROJECT_BYTES) {
-        throw new RangeError("project.gns3 is too large to render.");
-    }
-
-    return strFromU8(projectFile);
 }
 
 function inferNodeType(nodeTypeValue: unknown, symbolValue: unknown): NetworkNodeType {
@@ -464,7 +335,7 @@ export function normaliseGns3Project(project: GNS3Project): NormalisedTopology {
 }
 
 export async function loadGns3Topology(src: string): Promise<NormalisedTopology> {
-    const resolvedSource = await resolveProjectSource(src);
+    const resolvedSource = resolveProjectSource(src);
     const response = await fetch(resolvedSource, { credentials: "omit" });
     if (!response.ok) {
         throw new Error(`Could not load GNS3 project (${response.status} ${response.statusText}).`);
@@ -480,6 +351,6 @@ export async function loadGns3Topology(src: string): Promise<NormalisedTopology>
         throw new RangeError("The GNS3 project is too large to render.");
     }
 
-    const project = parseProjectJson(extractProjectJson(new Uint8Array(buffer)));
+    const project = parseProjectJson(new TextDecoder().decode(buffer));
     return normaliseGns3Project(project);
 }
