@@ -24,11 +24,18 @@ import { siteConfig } from './src/config.ts';
 import swup from '@swup/astro';
 import { fileURLToPath } from 'url';
 
+import cloudflare from '@astrojs/cloudflare';
+
 // Deployment platform configuration
 const DEPLOYMENT_PLATFORM = process.env.DEPLOYMENT_PLATFORM || 'netlify';
 
 export default defineConfig({
   site: siteConfig.site,
+
+  output: 'server',
+
+  adapter: cloudflare(),
+
   deployment: {
     platform: DEPLOYMENT_PLATFORM
   },
@@ -64,7 +71,12 @@ export default defineConfig({
       resources: ["'self'", "data:", "https:"]
     },
     connectDirective: {
-      resources: ["'self'", "https://giscus.app"]
+      resources: [
+        "'self'",
+        "https://giscus.app",
+        "https://gist.github.com",
+        "https://gist.githubusercontent.com"
+      ]
     },
     frameDirective: {
       resources: [
