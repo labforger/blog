@@ -1,4 +1,4 @@
-name = "astro-modular"
+name = "labforger-blog"
 compatibility_date = "2026-09-13"
 compatibility_flags = ["nodejs_compat"]
 main = "@astrojs/cloudflare/entrypoints/server"
