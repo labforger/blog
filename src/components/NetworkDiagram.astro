@@ -1,0 +1,2077 @@
+---
+interface Props {
+    id: string;
+    src: string;
+    height?: string;
+    toolbar?: boolean;
+    interactive?: boolean;
+    initialZoom?: number;
+    fitPadding?: number;
+    capture?: boolean;
+}
+
+const {
+    id,
+    src,
+    height = "32rem",
+    toolbar = true,
+    interactive = true,
+    initialZoom = 1,
+    fitPadding = 50,
+    capture = false,
+} = Astro.props;
+
+const safeInitialZoom = Number.isFinite(initialZoom)
+    ? Math.min(3, Math.max(0.25, initialZoom))
+    : 1;
+const safeFitPadding = Number.isFinite(fitPadding)
+    ? Math.min(200, Math.max(0, fitPadding))
+    : 50;
+const detailsHeadingId = `${id}-details-heading`;
+const sourceJson = JSON.stringify({
+    src,
+    interactive,
+    initialZoom: safeInitialZoom,
+    fitPadding: safeFitPadding,
+}).replaceAll("<", "\\u003c");
+---
+
+<div
+        class="network-diagram"
+        data-network-diagram
+        data-diagram-id={id}
+        data-diagram-src={src}
+        data-capture={capture ? "true" : undefined}
+        style={`--diagram-height: ${height}`}
+>
+    {toolbar && (
+        <div class="network-diagram__toolbar">
+            <button type="button" data-action="reset">
+                Reset view
+            </button>
+        </div>
+    )}
+
+    <div class="network-diagram__body" data-diagram-body>
+        <div
+                id={id}
+                class="network-diagram__canvas"
+                aria-label="Interactive network topology"
+        ></div>
+
+
+        <aside
+                class="network-diagram__details"
+                hidden={!interactive}
+                data-details-panel
+                aria-hidden="true"
+                aria-labelledby={detailsHeadingId}
+        >
+            <div class="network-diagram__details-header">
+                <h3
+                        id={detailsHeadingId}
+                        data-field="label"
+                        aria-live="polite"
+                ></h3>
+
+                <button
+                        type="button"
+                        class="network-diagram__close"
+                        data-action="close-panel"
+                        aria-label="Close details"
+                        tabindex="-1"
+                >
+                    ✕
+                </button>
+            </div>
+
+            <dl data-field="properties"></dl>
+
+            <p
+                    class="network-diagram__description"
+                    data-field="description"
+                    hidden
+            ></p>
+
+            <h4>Connections</h4>
+            <ul data-field="connections"></ul>
+        </aside>
+    </div>
+
+    <script
+            type="application/json"
+            data-network-source
+            set:html={sourceJson}
+    />
+</div>
+
+<script>
+    import cytoscape, {
+        type Core,
+        type ElementDefinition,
+        type EventObject,
+        type NodeSingular,
+    } from "cytoscape";
+    import { loadGns3Topology } from "./network-diagram/gns3";
+    import { prepareDrawingElements } from "./network-diagram/drawings";
+
+    const Z_BAND_SIZE = 100_000;
+    const NETWORK_EDGE_OFFSET = 500;
+    const NETWORK_NODE_OFFSET = 1_000;
+
+    interface PortMapping {
+        ethertype?: string;
+        name?: string;
+        port_number?: number;
+        type?: string;
+        vlan?: number;
+    }
+
+    interface DiagramElement extends HTMLElement {
+        cytoscapeInstance?: Core;
+        cleanup?: () => void;
+        openNodeId?: string;
+        panelAnimationFrame?: number;
+        resizeAnimationFrame?: number;
+    }
+
+    interface DrawingData {
+        data: {
+            id: string;
+            rotation?: number;
+            svg: string;
+            x: number;
+            y: number;
+            z?: number;
+        };
+    }
+
+    interface TopologyData {
+        nodes: ElementDefinition[];
+        edges: ElementDefinition[];
+        drawingElements: ElementDefinition[];
+    }
+
+    interface SourceConfig {
+        src: string;
+        interactive: boolean;
+        initialZoom: number;
+        fitPadding: number;
+    }
+
+    type PortColumnKey = Exclude<keyof PortMapping, "port_number">;
+
+    const NODE_TYPE_LABELS: Readonly<Record<string, string>> = {
+        router: "Router",
+        switch: "Switch",
+        firewall: "Firewall",
+        server: "Server",
+        computer: "Computer",
+        cloud: "Cloud",
+        nat: "NAT",
+        atm_switch: "ATM Switch",
+        hub: "Ethernet Hub",
+        frsw: "Frame Relay Switch",
+        unknown: "Unknown",
+    };
+
+    const PORT_TYPE_LABELS: Readonly<Record<string, string>> = {
+        access: "Access",
+        dot1q: "Trunk",
+        qinq: "QinQ",
+        ethernet: "Ethernet",
+    };
+
+    const DETAILED_PORT_TYPES = new Set(["access", "dot1q", "qinq"]);
+    const MISSING_PORT_NUMBER = Number.MAX_SAFE_INTEGER;
+
+    function hasDisplayValue(value: unknown): boolean {
+        return value !== undefined && value !== null && value !== "";
+    }
+
+    function isPlainObject(value: unknown): value is Record<string, unknown> {
+        return (
+            value !== null &&
+            typeof value === "object" &&
+            !Array.isArray(value)
+        );
+    }
+
+    function formatLabel(value: string): string {
+        return value
+            .replaceAll("_", " ")
+            .replaceAll("-", " ")
+            .replace(/\b\w/g, (character) => character.toUpperCase());
+    }
+
+    function formatNodeType(value: unknown): string {
+        const type = String(value ?? "").toLowerCase();
+
+        return NODE_TYPE_LABELS[type] ?? formatLabel(type);
+    }
+
+    function formatPropertyValue(value: unknown): string {
+        if (Array.isArray(value)) {
+            return value
+                .map((item) =>
+                    isPlainObject(item)
+                        ? JSON.stringify(item)
+                        : String(item),
+                )
+                .join(", ");
+        }
+
+        if (isPlainObject(value)) {
+            return JSON.stringify(value, null, 2);
+        }
+
+        return String(value ?? "");
+    }
+
+    function isPortMapping(value: unknown): value is PortMapping {
+        return isPlainObject(value);
+    }
+
+    function isPortMappingArray(value: unknown): value is PortMapping[] {
+        return Array.isArray(value) && value.every(isPortMapping);
+    }
+
+    function hasDetailedPortConfiguration(ports: PortMapping[]): boolean {
+        return ports.some((port) => {
+            const type = String(port.type ?? "").toLowerCase();
+
+            return (
+                DETAILED_PORT_TYPES.has(type) ||
+                hasDisplayValue(port.vlan) ||
+                hasDisplayValue(port.ethertype)
+            );
+        });
+    }
+
+    function formatPortSummary(ports: PortMapping[]): string {
+        if (ports.length === 1) {
+            return ports[0].name ?? "1 port";
+        }
+
+        const allEthernetPorts = ports.every((port) => {
+            const type = String(port.type ?? "").toLowerCase();
+            const name = String(port.name ?? "").toLowerCase();
+
+            return type === "ethernet" || name.startsWith("ethernet");
+        });
+
+        return allEthernetPorts
+            ? `${ports.length} Ethernet ports`
+            : `${ports.length} ports`;
+    }
+
+    function formatPortCell(
+        key: PortColumnKey,
+        value: PortMapping[PortColumnKey],
+    ): string {
+        if (!hasDisplayValue(value)) return "";
+
+        if (key === "type" && typeof value === "string") {
+            return PORT_TYPE_LABELS[value.toLowerCase()] ?? formatLabel(value);
+        }
+
+        return String(value);
+    }
+
+    function createPropertyRow(
+        label: string,
+        value?: string | HTMLElement,
+        modifierClass?: string,
+    ): HTMLDivElement {
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+
+        row.className = "network-diagram__property";
+        if (modifierClass) row.classList.add(modifierClass);
+
+        term.className = "network-diagram__property-label";
+        description.className = "network-diagram__property-value";
+
+        term.textContent = label;
+
+        if (typeof value === "string") {
+            description.textContent = value;
+        } else if (value) {
+            description.append(value);
+        }
+
+        row.append(term, description);
+        return row;
+    }
+
+    function renderPortsTable(ports: PortMapping[]): HTMLElement {
+        const wrapper = document.createElement("div");
+        const table = document.createElement("table");
+        const head = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        const body = document.createElement("tbody");
+
+        wrapper.className = "network-diagram__table-scroll";
+        table.className = "network-diagram__ports-table";
+
+        const columns: Array<{
+            label: string;
+            key: PortColumnKey;
+        }> = [
+            { label: "Name", key: "name" },
+            { label: "Type", key: "type" },
+            { label: "VLAN", key: "vlan" },
+        ];
+
+        if (ports.some((port) => hasDisplayValue(port.ethertype))) {
+            columns.push({
+                label: "EtherType",
+                key: "ethertype",
+            });
+        }
+
+        for (const column of columns) {
+            const heading = document.createElement("th");
+
+            heading.scope = "col";
+            heading.textContent = column.label;
+            headRow.append(heading);
+        }
+
+        head.append(headRow);
+
+        const sortedPorts = [...ports].sort(
+            (left, right) =>
+                (left.port_number ?? MISSING_PORT_NUMBER) -
+                (right.port_number ?? MISSING_PORT_NUMBER),
+        );
+
+        for (const port of sortedPorts) {
+            const row = document.createElement("tr");
+
+            for (const column of columns) {
+                const cell = document.createElement("td");
+
+                cell.textContent = formatPortCell(
+                    column.key,
+                    port[column.key],
+                );
+
+                row.append(cell);
+            }
+
+            body.append(row);
+        }
+
+        table.append(head, body);
+        wrapper.append(table);
+
+        return wrapper;
+    }
+
+    function renderProperties(
+        panel: HTMLElement,
+        node: NodeSingular,
+    ): void {
+        const propertiesList = panel.querySelector<HTMLDListElement>(
+            '[data-field="properties"]',
+        );
+
+        if (!propertiesList) return;
+
+        propertiesList.replaceChildren();
+
+        const fields: Array<[string, unknown]> = [
+            ["Type", formatNodeType(node.data("type"))],
+            ["Model", node.data("model")],
+            ["Management IP", node.data("managementIp")],
+        ];
+
+        const rawProperties = node.data("properties");
+        const additionalProperties = isPlainObject(rawProperties)
+            ? rawProperties
+            : undefined;
+
+        if (additionalProperties) {
+            for (const [label, value] of Object.entries(additionalProperties)) {
+                if (label === "ports_mapping" && isPortMappingArray(value)) {
+                    continue;
+                }
+
+                fields.push([formatLabel(label), value]);
+            }
+        }
+
+        for (const [label, value] of fields) {
+            if (!hasDisplayValue(value)) continue;
+
+            propertiesList.append(
+                createPropertyRow(label, formatPropertyValue(value)),
+            );
+        }
+
+        const ports = additionalProperties?.ports_mapping;
+
+        if (isPortMappingArray(ports) && ports.length > 0) {
+            const content = hasDetailedPortConfiguration(ports)
+                ? renderPortsTable(ports)
+                : formatPortSummary(ports);
+
+            propertiesList.append(
+                createPropertyRow(
+                    "Ports",
+                    content,
+                    "network-diagram__property--ports",
+                ),
+            );
+        }
+
+        propertiesList.hidden = propertiesList.childElementCount === 0;
+    }
+
+    function renderDescription(
+        panel: HTMLElement,
+        value: unknown,
+    ): void {
+        const description = panel.querySelector<HTMLElement>(
+            '[data-field="description"]',
+        );
+
+        if (!description) return;
+
+        const shouldShow = hasDisplayValue(value);
+
+        description.hidden = !shouldShow;
+        description.textContent = shouldShow ? String(value) : "";
+    }
+
+    function renderConnections(
+        panel: HTMLElement,
+        node: NodeSingular,
+    ): void {
+        const connectionList =
+            panel.querySelector<HTMLUListElement>(
+                '[data-field="connections"]',
+            );
+
+        if (!connectionList) return;
+
+        connectionList.replaceChildren();
+
+        node.connectedEdges().not(".drawing").forEach((edge) => {
+            const source = edge.source();
+            const target = edge.target();
+            const nodeIsSource = source.id() === node.id();
+            const remoteNode = nodeIsSource ? target : source;
+
+            const localInterface = nodeIsSource
+                ? edge.data("sourceInterface")
+                : edge.data("targetInterface");
+
+            const remoteInterface = nodeIsSource
+                ? edge.data("targetInterface")
+                : edge.data("sourceInterface");
+
+            const item = document.createElement("li");
+
+            item.textContent = [
+                localInterface || "Unknown interface",
+                " → ",
+                remoteNode.data("label"),
+                remoteInterface ? ` (${remoteInterface})` : "",
+            ].join("");
+
+            connectionList.append(item);
+        });
+
+        if (connectionList.childElementCount === 0) {
+            const item = document.createElement("li");
+
+            item.className = "network-diagram__empty-state";
+            item.textContent = "No connections";
+            connectionList.append(item);
+        }
+    }
+
+    function clearSelection(cy: Core): void {
+        cy.$(":selected").unselect();
+    }
+
+    function showNodeDetails(
+        diagram: DiagramElement,
+        node: NodeSingular,
+    ): void {
+        const panel = diagram.querySelector<HTMLElement>(
+            "[data-details-panel]",
+        );
+        const closeButton = diagram.querySelector<HTMLButtonElement>(
+            '[data-action="close-panel"]',
+        );
+        const heading = panel?.querySelector<HTMLElement>(
+            '[data-field="label"]',
+        );
+
+        if (!panel) return;
+
+        if (heading) {
+            heading.textContent = String(node.data("label") ?? "");
+        }
+
+        renderProperties(panel, node);
+        renderDescription(panel, node.data("description"));
+        renderConnections(panel, node);
+
+        panel.scrollTop = 0;
+        diagram.openNodeId = node.id();
+        panel.setAttribute("aria-hidden", "false");
+
+        if (diagram.panelAnimationFrame !== undefined) {
+            cancelAnimationFrame(diagram.panelAnimationFrame);
+        }
+
+        if (!panel.classList.contains("is-open")) {
+            // Commit the closed state before starting the slide animation.
+            void panel.offsetWidth;
+
+            diagram.panelAnimationFrame = requestAnimationFrame(() => {
+                panel.classList.add("is-open");
+                diagram.panelAnimationFrame = undefined;
+            });
+        }
+
+        if (closeButton) {
+            closeButton.tabIndex = 0;
+        }
+    }
+
+    function closeDetails(diagram: DiagramElement): void {
+        const panel = diagram.querySelector<HTMLElement>(
+            "[data-details-panel]",
+        );
+        const closeButton = diagram.querySelector<HTMLButtonElement>(
+            '[data-action="close-panel"]',
+        );
+
+        if (diagram.panelAnimationFrame !== undefined) {
+            cancelAnimationFrame(diagram.panelAnimationFrame);
+            diagram.panelAnimationFrame = undefined;
+        }
+
+        diagram.openNodeId = undefined;
+
+        if (panel) {
+            panel.setAttribute("aria-hidden", "true");
+            panel.classList.remove("is-open");
+        }
+
+        if (closeButton) {
+            closeButton.tabIndex = -1;
+        }
+    }
+
+    function parseTopology(
+        topologyElement: HTMLScriptElement,
+    ): TopologyData | undefined {
+        try {
+            const parsed = JSON.parse(topologyElement.textContent ?? "");
+
+            if (
+                !isPlainObject(parsed) ||
+                !Array.isArray(parsed.nodes) ||
+                !Array.isArray(parsed.edges)
+            ) {
+                throw new TypeError("Topology JSON has an invalid shape.");
+            }
+
+            return {
+                nodes: parsed.nodes as ElementDefinition[],
+                edges: parsed.edges as ElementDefinition[],
+                drawingElements: Array.isArray(parsed.drawingElements)
+                    ? parsed.drawingElements as ElementDefinition[]
+                    : [],
+            };
+        } catch (error) {
+            console.error("Could not parse network topology:", error);
+            return undefined;
+        }
+    }
+
+    interface DrawingElementData {
+        id: string;
+        drawingType: "anchor" | "line" | "text" | "fill";
+        label?: string;
+        strokeWidth?: number;
+        fontSize?: number;
+        fontWeight?: string;
+        source?: string;
+        target?: string;
+    }
+
+    function parseNumber(value: string | null, fallback = 0): number {
+        if (!value) return fallback;
+        const parsed = Number.parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function rotatePoint(
+        x: number,
+        y: number,
+        centreX: number,
+        centreY: number,
+        degrees: number,
+    ): { x: number; y: number } {
+        if (degrees === 0) return { x, y };
+
+        const radians = degrees * Math.PI / 180;
+        const cosine = Math.cos(radians);
+        const sine = Math.sin(radians);
+        const offsetX = x - centreX;
+        const offsetY = y - centreY;
+
+        return {
+            x: centreX + offsetX * cosine - offsetY * sine,
+            y: centreY + offsetX * sine + offsetY * cosine,
+        };
+    }
+
+    function createDrawingAnchor(
+        id: string,
+        x: number,
+        y: number,
+        z: number,
+    ): ElementDefinition {
+        return {
+            group: "nodes",
+            data: {
+                id,
+                drawingType: "anchor",
+                z,
+            } satisfies DrawingElementData & { z: number },
+            position: { x, y },
+            classes: "drawing drawing-anchor",
+            locked: true,
+            selectable: false,
+            grabbable: false,
+        };
+    }
+
+    function createDrawingEdge(
+        id: string,
+        source: string,
+        target: string,
+        strokeWidth: number,
+        z: number,
+    ): ElementDefinition {
+        return {
+            group: "edges",
+            data: {
+                id,
+                source,
+                target,
+                drawingType: "line",
+                strokeWidth,
+                z,
+            } satisfies DrawingElementData & { z: number },
+            classes: "drawing drawing-line",
+            selectable: false,
+        };
+    }
+
+    function createLineElements(
+        baseId: string,
+        start: { x: number; y: number },
+        end: { x: number; y: number },
+        strokeWidth: number,
+        z: number,
+    ): ElementDefinition[] {
+        const startId = `${baseId}-start`;
+        const endId = `${baseId}-end`;
+
+        return [
+            createDrawingAnchor(startId, start.x, start.y, z),
+            createDrawingAnchor(endId, end.x, end.y, z),
+            createDrawingEdge(`${baseId}-edge`, startId, endId, strokeWidth, z),
+        ];
+    }
+
+    function parsePoints(value: string | null): Array<{ x: number; y: number }> {
+        if (!value) return [];
+
+        const numbers = value
+            .trim()
+            .split(/[\s,]+/)
+            .map(Number)
+            .filter(Number.isFinite);
+        const points: Array<{ x: number; y: number }> = [];
+
+        for (let index = 0; index + 1 < numbers.length; index += 2) {
+            points.push({ x: numbers[index], y: numbers[index + 1] });
+        }
+
+        return points;
+    }
+
+    function convertDrawingToElements(
+        drawing: DrawingData,
+    ): ElementDefinition[] {
+        const parser = new DOMParser();
+        const document = parser.parseFromString(
+            drawing.data.svg,
+            "image/svg+xml",
+        );
+        const root = document.documentElement;
+
+        if (
+            root.nodeName.toLowerCase() === "parsererror" ||
+            root.nodeName.toLowerCase() !== "svg"
+        ) {
+            console.warn(`Could not parse drawing ${drawing.data.id}`);
+            return [];
+        }
+
+        const width = parseNumber(root.getAttribute("width"));
+        const height = parseNumber(root.getAttribute("height"));
+        const originX = drawing.data.x;
+        const originY = drawing.data.y;
+        const centreX = originX + width / 2;
+        const centreY = originY + height / 2;
+        const rotation = drawing.data.rotation ?? 0;
+        const z = drawing.data.z ?? 0;
+        const elements: ElementDefinition[] = [];
+        let sequence = 0;
+
+        const absolutePoint = (x: number, y: number) => rotatePoint(
+            originX + x,
+            originY + y,
+            centreX,
+            centreY,
+            rotation,
+        );
+
+        const addPath = (
+            points: Array<{ x: number; y: number }>,
+            closed: boolean,
+            strokeWidth: number,
+            prefix: string,
+        ): void => {
+            if (points.length < 2) return;
+
+            const anchorIds = points.map((point, index) => {
+                const transformed = absolutePoint(point.x, point.y);
+                const anchorId = `${prefix}-point-${index}`;
+                elements.push(
+                    createDrawingAnchor(
+                        anchorId,
+                        transformed.x,
+                        transformed.y,
+                        z,
+                    ),
+                );
+                return anchorId;
+            });
+
+            const edgeCount = closed ? anchorIds.length : anchorIds.length - 1;
+            for (let index = 0; index < edgeCount; index += 1) {
+                elements.push(
+                    createDrawingEdge(
+                        `${prefix}-segment-${index}`,
+                        anchorIds[index],
+                        anchorIds[(index + 1) % anchorIds.length],
+                        strokeWidth,
+                        z,
+                    ),
+                );
+            }
+        };
+
+        for (const element of root.querySelectorAll("rect, line, polyline, polygon, text")) {
+            const tag = element.tagName.toLowerCase();
+            const baseId = `drawing-${drawing.data.id}-${sequence++}`;
+            const strokeWidth = Math.max(
+                0.5,
+                parseNumber(element.getAttribute("stroke-width"), 2),
+            );
+
+            if (tag === "rect") {
+                const x = parseNumber(element.getAttribute("x"));
+                const y = parseNumber(element.getAttribute("y"));
+                const rectWidth = parseNumber(element.getAttribute("width"));
+                const rectHeight = parseNumber(element.getAttribute("height"));
+
+                addPath([
+                    { x, y },
+                    { x: x + rectWidth, y },
+                    { x: x + rectWidth, y: y + rectHeight },
+                    { x, y: y + rectHeight },
+                ], true, strokeWidth, baseId);
+                continue;
+            }
+
+            if (tag === "line") {
+                const start = absolutePoint(
+                    parseNumber(element.getAttribute("x1")),
+                    parseNumber(element.getAttribute("y1")),
+                );
+                const end = absolutePoint(
+                    parseNumber(element.getAttribute("x2")),
+                    parseNumber(element.getAttribute("y2")),
+                );
+
+                elements.push(...createLineElements(baseId, start, end, strokeWidth, z));
+                continue;
+            }
+
+            if (tag === "polyline" || tag === "polygon") {
+                addPath(
+                    parsePoints(element.getAttribute("points")),
+                    tag === "polygon",
+                    strokeWidth,
+                    baseId,
+                );
+                continue;
+            }
+
+            if (tag === "text") {
+                const position = absolutePoint(
+                    parseNumber(element.getAttribute("x")),
+                    parseNumber(element.getAttribute("y")),
+                );
+                const label = element.textContent?.trim() ?? "";
+                if (!label) continue;
+
+                elements.push({
+                    group: "nodes",
+                    data: {
+                        id: baseId,
+                        drawingType: "text",
+                        label,
+                        fontSize: Math.max(
+                            1,
+                            parseNumber(element.getAttribute("font-size"), 10),
+                        ),
+                        fontWeight: element.getAttribute("font-weight") ?? "normal",
+                        z,
+                    } satisfies DrawingElementData & { z: number },
+                    position,
+                    classes: "drawing drawing-text",
+                    locked: true,
+                    selectable: false,
+                    grabbable: false,
+                });
+            }
+        }
+
+        return elements;
+    }
+
+    function convertDrawingsToElements(
+        drawings: DrawingData[],
+    ): ElementDefinition[] {
+        return [...drawings]
+            .sort((left, right) =>
+                (left.data.z ?? 0) - (right.data.z ?? 0))
+            .flatMap(convertDrawingToElements);
+    }
+
+    interface RgbColour {
+        r: number;
+        g: number;
+        b: number;
+    }
+
+    interface HslColour {
+        h: number;
+        s: number;
+        l: number;
+    }
+
+    function parseCssColour(value: unknown): RgbColour | undefined {
+        let colour = String(value ?? "").trim().toLowerCase();
+
+        // GNS3/Qt may emit or tolerate shortened malformed values such as
+        // #004ff. Treat 4- or 5-digit opaque hex colours as left-padded
+        // six-digit RGB, matching the colour GNS3 displays.
+        const incompleteHex = colour.match(/^#([0-9a-f]{4,5})$/i);
+        if (incompleteHex) {
+            colour = `#${incompleteHex[1].padStart(6, "0")}`;
+        }
+
+        const shortHex = colour.match(/^#([0-9a-f]{3})$/i);
+        if (shortHex) {
+            return {
+                r: Number.parseInt(shortHex[1][0].repeat(2), 16),
+                g: Number.parseInt(shortHex[1][1].repeat(2), 16),
+                b: Number.parseInt(shortHex[1][2].repeat(2), 16),
+            };
+        }
+
+        const hex = colour.match(/^#([0-9a-f]{6})(?:[0-9a-f]{2})?$/i);
+        if (hex) {
+            return {
+                r: Number.parseInt(hex[1].slice(0, 2), 16),
+                g: Number.parseInt(hex[1].slice(2, 4), 16),
+                b: Number.parseInt(hex[1].slice(4, 6), 16),
+            };
+        }
+
+        const rgb = colour.match(
+            /^rgba?\(\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[, ]\s*([\d.]+)/,
+        );
+        if (!rgb) return undefined;
+
+        return {
+            r: Math.min(255, Math.max(0, Number(rgb[1]))),
+            g: Math.min(255, Math.max(0, Number(rgb[2]))),
+            b: Math.min(255, Math.max(0, Number(rgb[3]))),
+        };
+    }
+
+    function rgbToHsl({ r, g, b }: RgbColour): HslColour {
+        const red = r / 255;
+        const green = g / 255;
+        const blue = b / 255;
+        const maximum = Math.max(red, green, blue);
+        const minimum = Math.min(red, green, blue);
+        const difference = maximum - minimum;
+        const lightness = (maximum + minimum) / 2;
+        let hue = 0;
+
+        if (difference !== 0) {
+            if (maximum === red) {
+                hue = ((green - blue) / difference) % 6;
+            } else if (maximum === green) {
+                hue = (blue - red) / difference + 2;
+            } else {
+                hue = (red - green) / difference + 4;
+            }
+            hue = (hue * 60 + 360) % 360;
+        }
+
+        const saturation = difference === 0
+            ? 0
+            : difference / (1 - Math.abs(2 * lightness - 1));
+
+        return { h: hue, s: saturation, l: lightness };
+    }
+
+    function hslToRgb({ h, s, l }: HslColour): RgbColour {
+        const chroma = (1 - Math.abs(2 * l - 1)) * s;
+        const segment = h / 60;
+        const secondary = chroma * (1 - Math.abs(segment % 2 - 1));
+        let red = 0;
+        let green = 0;
+        let blue = 0;
+
+        if (segment < 1) [red, green] = [chroma, secondary];
+        else if (segment < 2) [red, green] = [secondary, chroma];
+        else if (segment < 3) [green, blue] = [chroma, secondary];
+        else if (segment < 4) [green, blue] = [secondary, chroma];
+        else if (segment < 5) [red, blue] = [secondary, chroma];
+        else [red, blue] = [chroma, secondary];
+
+        const match = l - chroma / 2;
+        return {
+            r: Math.round((red + match) * 255),
+            g: Math.round((green + match) * 255),
+            b: Math.round((blue + match) * 255),
+        };
+    }
+
+    function colourLuminance({ r, g, b }: RgbColour): number {
+        const linearise = (channel: number): number => {
+            const value = channel / 255;
+            return value <= 0.04045
+                ? value / 12.92
+                : ((value + 0.055) / 1.055) ** 2.4;
+        };
+
+        return (
+            0.2126 * linearise(r) +
+            0.7152 * linearise(g) +
+            0.0722 * linearise(b)
+        );
+    }
+
+    function colourContrast(left: RgbColour, right: RgbColour): number {
+        const leftLuminance = colourLuminance(left);
+        const rightLuminance = colourLuminance(right);
+        return (
+            (Math.max(leftLuminance, rightLuminance) + 0.05) /
+            (Math.min(leftLuminance, rightLuminance) + 0.05)
+        );
+    }
+
+    function rgbCss({ r, g, b }: RgbColour): string {
+        return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function adaptDrawingColour(
+        sourceValue: unknown,
+        background: RgbColour,
+        minimumContrast: number,
+        fallback: string,
+    ): string {
+        const source = parseCssColour(sourceValue) ?? parseCssColour(fallback);
+        if (!source) return fallback;
+        if (colourContrast(source, background) >= minimumContrast) {
+            return rgbCss(source);
+        }
+
+        const hsl = rgbToHsl(source);
+        const lighten = colourLuminance(background) < 0.45;
+
+        // Keep the hue intact. Increase saturation only enough to stop a
+        // chromatic colour becoming muddy while lightness is adjusted.
+        if (hsl.s > 0.02) hsl.s = Math.max(hsl.s, 0.45);
+
+        for (let index = 0; index < 100; index += 1) {
+            hsl.l = lighten
+                ? Math.min(1, hsl.l + 0.01)
+                : Math.max(0, hsl.l - 0.01);
+            const candidate = hslToRgb(hsl);
+            if (colourContrast(candidate, background) >= minimumContrast) {
+                return rgbCss(candidate);
+            }
+        }
+
+        return lighten ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)";
+    }
+
+    function applyDiagramTheme(
+        diagram: HTMLElement,
+        cy: Core,
+    ): void {
+        const styles = getComputedStyle(diagram);
+        const text = styles.getPropertyValue("--diagram-text").trim();
+        const edge = styles.getPropertyValue("--diagram-edge").trim();
+        const backgroundValue = styles
+            .getPropertyValue("--diagram-background")
+            .trim();
+        const labelBackground = styles
+            .getPropertyValue("--diagram-label-background")
+            .trim();
+        const selection = styles
+            .getPropertyValue("--diagram-selection")
+            .trim();
+        const background = parseCssColour(backgroundValue) ?? {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+
+        cy.style()
+            .selector("node:not(.drawing)")
+            .style({
+                color: text,
+                "text-background-color": labelBackground,
+            })
+            .selector("edge:not(.drawing)")
+            .style({
+                "line-color": edge,
+            })
+            .selector("node:selected")
+            .style({
+                "overlay-color": selection,
+            })
+            .selector("edge:selected")
+            .style({
+                "line-color": selection,
+            })
+            .update();
+
+        cy.edges(".drawing-line").forEach((drawingEdge) => {
+            drawingEdge.style({
+                "line-color": adaptDrawingColour(
+                    drawingEdge.data("originalStroke"),
+                    background,
+                    3,
+                    text,
+                ),
+                "line-opacity": Number(
+                    drawingEdge.data("strokeOpacity") ?? 1,
+                ),
+            });
+        });
+
+        cy.nodes(".drawing-text").forEach((drawingText) => {
+            drawingText.style({
+                color: adaptDrawingColour(
+                    drawingText.data("originalColor"),
+                    background,
+                    4.5,
+                    text,
+                ),
+                "text-opacity": Number(
+                    drawingText.data("textOpacity") ?? 1,
+                ),
+            });
+        });
+
+        cy.nodes(".drawing-fill").forEach((drawingFill) => {
+            drawingFill.style({
+                "background-color": adaptDrawingColour(
+                    drawingFill.data("originalFill"),
+                    background,
+                    1.4,
+                    backgroundValue,
+                ),
+                "background-opacity": Number(
+                    drawingFill.data("fillOpacity") ?? 1,
+                ),
+            });
+        });
+
+        cy.nodes(".drawing-shape").forEach((drawingShape) => {
+            const fillOpacity = Number(
+                drawingShape.data("fillOpacity") ?? 0,
+            );
+            drawingShape.style({
+                "background-color": adaptDrawingColour(
+                    drawingShape.data("originalFill"),
+                    background,
+                    1.4,
+                    backgroundValue,
+                ),
+                "background-opacity": fillOpacity,
+                "border-color": adaptDrawingColour(
+                    drawingShape.data("originalStroke"),
+                    background,
+                    3,
+                    text,
+                ),
+                "border-opacity": Number(
+                    drawingShape.data("strokeOpacity") ?? 1,
+                ),
+                "border-width": Number(
+                    drawingShape.data("strokeWidth") ?? 2,
+                ),
+            });
+        });
+    }
+
+    async function initialiseDiagram(diagram: DiagramElement): Promise<void> {
+        if (diagram.cytoscapeInstance) return;
+
+        const canvas = diagram.querySelector<HTMLElement>(
+            ".network-diagram__canvas",
+        );
+        const body = diagram.querySelector<HTMLElement>(
+            "[data-diagram-body]",
+        );
+        const sourceElement = diagram.querySelector<HTMLScriptElement>(
+            "script[data-network-source]",
+        );
+        const resetButton = diagram.querySelector<HTMLButtonElement>(
+            '[data-action="reset"]',
+        );
+        const closeButton = diagram.querySelector<HTMLButtonElement>(
+            '[data-action="close-panel"]',
+        );
+
+        if (!canvas || !body || !sourceElement) return;
+
+        let topology: TopologyData;
+        let sourceConfig: SourceConfig;
+        try {
+            const parsedConfig: unknown = JSON.parse(sourceElement.textContent ?? "{}");
+            if (!isPlainObject(parsedConfig) || typeof parsedConfig.src !== "string") {
+                throw new TypeError("The network diagram source is invalid.");
+            }
+
+            sourceConfig = {
+                src: parsedConfig.src,
+                interactive: parsedConfig.interactive !== false,
+                initialZoom: typeof parsedConfig.initialZoom === "number"
+                    ? Math.min(3, Math.max(0.25, parsedConfig.initialZoom))
+                    : 1,
+                fitPadding: typeof parsedConfig.fitPadding === "number"
+                    ? Math.min(200, Math.max(0, parsedConfig.fitPadding))
+                    : 50,
+            };
+
+            const loaded = await loadGns3Topology(sourceConfig.src);
+            const topologyNodes = loaded.nodes.map((node, index) => ({
+                ...node,
+                data: {
+                    ...node.data,
+                    renderZ:
+                        (node.position.z ?? 1) * Z_BAND_SIZE +
+                        NETWORK_NODE_OFFSET +
+                        index,
+                },
+            }));
+            const topologyEdges = loaded.edges.map((edge, index) => ({
+                ...edge,
+                data: {
+                    ...edge.data,
+                    renderZ: Z_BAND_SIZE + NETWORK_EDGE_OFFSET + index,
+                },
+            }));
+
+            topology = {
+                nodes: topologyNodes,
+                edges: topologyEdges,
+                drawingElements: prepareDrawingElements(loaded.drawings),
+            };
+        } catch (error) {
+            console.error("Could not load network topology:", error);
+            canvas.textContent = error instanceof Error
+                ? error.message
+                : "Could not load the network diagram.";
+            canvas.classList.add("network-diagram__canvas--error");
+            diagram.dataset.graphError = "true";
+            return;
+        }
+
+        const updateAvailableHeight = (): void => {
+            const viewportHeight = Math.max(
+                window.innerHeight,
+                document.documentElement.clientHeight,
+            );
+            const bodyTop = body.getBoundingClientRect().top;
+            const availableHeight = Math.max(0, viewportHeight - bodyTop);
+
+            body.style.setProperty(
+                "--diagram-available-height",
+                `${availableHeight}px`,
+            );
+        };
+
+        const scheduleResize = (): void => {
+            if (diagram.resizeAnimationFrame !== undefined) return;
+
+            diagram.resizeAnimationFrame = requestAnimationFrame(() => {
+                updateAvailableHeight();
+                diagram.cytoscapeInstance?.resize();
+                diagram.resizeAnimationFrame = undefined;
+            });
+        };
+
+        updateAvailableHeight();
+
+        const cy = cytoscape({
+            container: canvas,
+            elements: [
+                ...topology.drawingElements,
+                ...topology.nodes,
+                ...topology.edges,
+            ],
+            layout: {
+                name: "preset",
+                fit: true,
+                padding: sourceConfig.fitPadding,
+            },
+            minZoom: 0.35,
+            maxZoom: 4,
+            wheelSensitivity: 0.8,
+            userPanningEnabled: sourceConfig.interactive,
+            userZoomingEnabled: sourceConfig.interactive,
+            autoungrabify: true,
+            autounselectify: !sourceConfig.interactive,
+            boxSelectionEnabled: false,
+            selectionType: "single",
+            style: [
+                {
+                    selector: "node",
+                    style: {
+                        width: 72,
+                        height: 72,
+                        "background-color": "transparent",
+                        "background-opacity": 0,
+                        "border-width": 0,
+                        "background-fit": "contain",
+                        "background-repeat": "no-repeat",
+                        label: "data(label)",
+                        color: "var(--diagram-text, #e5e7eb)",
+                        "font-size": 13,
+                        "font-weight": 600,
+                        "text-valign": "bottom",
+                        "text-halign": "center",
+                        "text-margin-y": 10,
+                        "text-background-color":
+                            "var(--diagram-label-background, #111827)",
+                        "text-background-opacity": 0.85,
+                        "text-background-padding": "4px",
+                        "text-background-shape": "roundrectangle",
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: 'node[type="router"]',
+                    style: {
+                        "background-image": "/network-icons/router.png",
+                    },
+                },
+                {
+                    selector: 'node[type="switch"]',
+                    style: {
+                        "background-image": "/network-icons/switch.png",
+                    },
+                },
+                {
+                    selector: 'node[type="firewall"]',
+                    style: {
+                        "background-image": "/network-icons/firewall.png",
+                    },
+                },
+                {
+                    selector: 'node[type="server"]',
+                    style: {
+                        "background-image": "/network-icons/server.svg",
+                    },
+                },
+                {
+                    selector: 'node[type="computer"]',
+                    style: {
+                        "background-image": "/network-icons/client.png",
+                    },
+                },
+                {
+                    selector: 'node[type="cloud"]',
+                    style: {
+                        "background-image": "/network-icons/cloud.png",
+                    },
+                },
+                {
+                    selector: 'node[type="atm_switch"]',
+                    style: {
+                        "background-image": "/network-icons/atm.png",
+                    },
+                },
+                {
+                    selector: 'node[type="nat"]',
+                    style: {
+                        "background-image": "/network-icons/nat.png",
+                    },
+                },
+                {
+                    selector: 'node[type="hub"]',
+                    style: {
+                        "background-image": "/network-icons/hub.png",
+                    },
+                },
+                {
+                    selector: 'node[type="frsw"]',
+                    style: {
+                        "background-image": "/network-icons/frsw.png",
+                    },
+                },
+                {
+                    selector: "node.drawing-fill",
+                    style: {
+                        width: "data(drawingWidth)",
+                        height: "data(drawingHeight)",
+                        shape: "rectangle",
+                        label: "",
+                        "background-color": "transparent",
+                        "background-opacity": 0,
+                        "border-width": 0,
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "node.drawing-shape",
+                    style: {
+                        width: "data(drawingWidth)",
+                        height: "data(drawingHeight)",
+                        label: "",
+                        "background-color": "transparent",
+                        "background-opacity": 0,
+                        "border-color": "var(--diagram-text, #e5e7eb)",
+                        "border-width": "data(strokeWidth)",
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "node.drawing-rectangle",
+                    style: {
+                        shape: "rectangle",
+                    },
+                },
+                {
+                    selector: "node.drawing-ellipse",
+                    style: {
+                        shape: "ellipse",
+                    },
+                },
+                {
+                    selector: "node.drawing-anchor",
+                    style: {
+                        width: 1,
+                        height: 1,
+                        label: "",
+                        "background-opacity": 0,
+                        "border-width": 0,
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "edge.drawing-line",
+                    style: {
+                        width: "data(strokeWidth)",
+                        "line-color": "var(--diagram-text, #e5e7eb)",
+                        "curve-style": "straight",
+                        "source-arrow-shape": "none",
+                        "target-arrow-shape": "none",
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "node.drawing-text",
+                    style: {
+                        width: "data(drawingWidth)",
+                        height: "data(drawingHeight)",
+                        label: "data(label)",
+                        color: "var(--diagram-text, #e5e7eb)",
+                        "font-size": "data(fontSize)",
+                        "font-weight": "data(fontWeight)",
+                        "text-valign": "center",
+                        "text-halign": "center",
+                        "text-margin-x": 0,
+                        "text-margin-y": 0,
+                        "text-background-opacity": 0,
+                        "background-opacity": 0,
+                        "border-width": 0,
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "node:selected",
+                    style: {
+                        "overlay-color": "#60a5fa",
+                        "overlay-opacity": 0.18,
+                        "overlay-padding": 10,
+                    },
+                },
+                {
+                    selector: "edge",
+                    style: {
+                        width: 2,
+                        "line-color": "var(--diagram-edge, #64748b)",
+                        "curve-style": "straight",
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "edge:selected",
+                    style: {
+                        width: 4,
+                        "line-color": "#60a5fa",
+                    },
+                },
+                {
+                    selector: "edge.drawing-line",
+                    style: {
+                        width: "data(strokeWidth)",
+                        "line-color": "var(--diagram-text, #e5e7eb)",
+                        "curve-style": "straight",
+                        "source-arrow-shape": "none",
+                        "target-arrow-shape": "none",
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "node.drawing-anchor",
+                    style: {
+                        width: 1,
+                        height: 1,
+                        label: "",
+                        "background-opacity": 0,
+                        "border-width": 0,
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+                {
+                    selector: "node.drawing-text",
+                    style: {
+                        width: "data(drawingWidth)",
+                        height: "data(drawingHeight)",
+                        label: "data(label)",
+                        color: "var(--diagram-text, #e5e7eb)",
+                        "font-size": "data(fontSize)",
+                        "font-weight": "data(fontWeight)",
+                        "text-valign": "center",
+                        "text-halign": "center",
+                        "text-margin-x": 0,
+                        "text-margin-y": 0,
+                        "text-background-opacity": 0,
+                        "background-opacity": 0,
+                        "border-width": 0,
+                        "events": "no",
+                        "overlay-opacity": 0,
+                        "z-index": "data(renderZ)",
+                        "z-index-compare": "manual",
+                        "z-compound-depth": "orphan",
+                    },
+                },
+            ],
+        });
+
+        diagram.cytoscapeInstance = cy;
+        applyDiagramTheme(diagram, cy);
+
+        const applyInitialView = (): void => {
+            cy.resize();
+            cy.fit(undefined, sourceConfig.fitPadding);
+            if (sourceConfig.initialZoom !== 1) {
+                cy.zoom({
+                    level: cy.zoom() * sourceConfig.initialZoom,
+                    renderedPosition: {
+                        x: cy.width() / 2,
+                        y: cy.height() / 2,
+                    },
+                });
+            }
+            cy.center();
+        };
+
+        const handleNodeTap = (event: EventObject): void => {
+            const node = event.target as NodeSingular;
+            const panel = diagram.querySelector<HTMLElement>(
+                "[data-details-panel]",
+            );
+
+            const sameNodeIsOpen =
+                diagram.openNodeId === node.id() &&
+                (
+                    panel?.classList.contains("is-open") ||
+                    diagram.panelAnimationFrame !== undefined
+                );
+
+            if (sameNodeIsOpen) {
+                clearSelection(cy);
+                closeDetails(diagram);
+                return;
+            }
+
+            showNodeDetails(diagram, node);
+        };
+
+        const handleCanvasTap = (event: EventObject): void => {
+            if (event.target !== cy) return;
+
+            clearSelection(cy);
+            closeDetails(diagram);
+        };
+
+        const handleReset = (): void => {
+            cy.fit(undefined, 50);
+            cy.center();
+        };
+
+        const handleClose = (): void => {
+            clearSelection(cy);
+            closeDetails(diagram);
+        };
+
+        const handleKeydown = (event: KeyboardEvent): void => {
+            if (
+                event.key !== "Escape" ||
+                diagram.openNodeId === undefined
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            handleClose();
+        };
+
+        const themeObserver = new MutationObserver(() => {
+            applyDiagramTheme(diagram, cy);
+        });
+
+        const resizeObserver = new ResizeObserver(scheduleResize);
+
+        themeObserver.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ["class", "data-theme"],
+        });
+
+        resizeObserver.observe(canvas);
+        resizeObserver.observe(diagram);
+
+        if (sourceConfig.interactive) {
+            cy.on("tap", "node:not(.drawing)", handleNodeTap);
+            cy.on("tap", handleCanvasTap);
+        }
+        resetButton?.addEventListener("click", handleReset);
+        closeButton?.addEventListener("click", handleClose);
+        document.addEventListener("keydown", handleKeydown);
+        window.addEventListener("resize", scheduleResize);
+        window.visualViewport?.addEventListener("resize", scheduleResize);
+
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                applyInitialView();
+                diagram.dataset.graphReady = "true";
+                window.dispatchEvent(new CustomEvent("network-diagram-ready", {
+                    detail: { id: diagram.dataset.diagramId },
+                }));
+            });
+        });
+
+        diagram.cleanup = () => {
+            if (sourceConfig.interactive) {
+                cy.off("tap", "node:not(.drawing)", handleNodeTap);
+                cy.off("tap", handleCanvasTap);
+            }
+            resetButton?.removeEventListener("click", handleReset);
+            closeButton?.removeEventListener("click", handleClose);
+            document.removeEventListener("keydown", handleKeydown);
+            window.removeEventListener("resize", scheduleResize);
+            window.visualViewport?.removeEventListener(
+                "resize",
+                scheduleResize,
+            );
+
+            themeObserver.disconnect();
+            resizeObserver.disconnect();
+
+            if (diagram.panelAnimationFrame !== undefined) {
+                cancelAnimationFrame(diagram.panelAnimationFrame);
+            }
+
+            if (diagram.resizeAnimationFrame !== undefined) {
+                cancelAnimationFrame(diagram.resizeAnimationFrame);
+            }
+
+            cy.destroy();
+
+            diagram.cytoscapeInstance = undefined;
+            diagram.cleanup = undefined;
+            diagram.openNodeId = undefined;
+            diagram.panelAnimationFrame = undefined;
+            diagram.resizeAnimationFrame = undefined;
+        };
+    }
+
+    function initialiseAllDiagrams(): void {
+        document
+            .querySelectorAll<DiagramElement>("[data-network-diagram]")
+            .forEach((diagram) => void initialiseDiagram(diagram));
+    }
+
+    function cleanupAllDiagrams(): void {
+        document
+            .querySelectorAll<DiagramElement>("[data-network-diagram]")
+            .forEach((diagram) => diagram.cleanup?.());
+    }
+
+    initialiseAllDiagrams();
+
+    document.addEventListener("astro:page-load", initialiseAllDiagrams);
+    document.addEventListener("astro:before-swap", cleanupAllDiagrams);
+</script>
+
+<style>
+    .network-diagram {
+        --diagram-background: #ffffff;
+        --diagram-grid: rgb(15 23 42 / 12%);
+        --diagram-text: #0f172a;
+        --diagram-edge: #64748b;
+        --diagram-label-background: #ffffff;
+        --diagram-selection: #2563eb;
+        --diagram-panel-background: #f8fafc;
+        --diagram-panel-text: #0f172a;
+        --diagram-panel-muted: #475569;
+        --diagram-panel-border: rgb(15 23 42 / 15%);
+        --diagram-button-background: #ffffff;
+        --diagram-button-background-hover: #f1f5f9;
+        --diagram-button-text: #0f172a;
+        --diagram-button-border: rgb(15 23 42 / 22%);
+        --diagram-scrollbar-track: rgb(15 23 42 / 6%);
+        --diagram-scrollbar-thumb: rgb(71 85 105 / 55%);
+        --diagram-scrollbar-thumb-hover: rgb(51 65 85 / 75%);
+
+        overflow: hidden;
+        border: 1px solid rgb(15 23 42 / 18%);
+        border-radius: 0.75rem;
+        background: var(--diagram-background);
+        color: var(--diagram-text);
+    }
+
+    :global(html.dark) .network-diagram,
+    :global(html[data-theme="dark"]) .network-diagram {
+        --diagram-background: #0f172a;
+        --diagram-grid: rgb(148 163 184 / 18%);
+        --diagram-text: #f8fafc;
+        --diagram-edge: #94a3b8;
+        --diagram-label-background: #111827;
+        --diagram-selection: #60a5fa;
+        --diagram-panel-background: #111827;
+        --diagram-panel-text: #f8fafc;
+        --diagram-panel-muted: #94a3b8;
+        --diagram-panel-border: rgb(148 163 184 / 20%);
+        --diagram-button-background: #1e293b;
+        --diagram-button-background-hover: #334155;
+        --diagram-button-text: #f8fafc;
+        --diagram-button-border: rgb(148 163 184 / 35%);
+        --diagram-scrollbar-track: rgb(255 255 255 / 5%);
+        --diagram-scrollbar-thumb: rgb(148 163 184 / 55%);
+        --diagram-scrollbar-thumb-hover: rgb(203 213 225 / 75%);
+
+        border-color: rgb(148 163 184 / 25%);
+    }
+
+    .network-diagram[data-capture="true"] {
+        border: 0;
+        border-radius: 0;
+    }
+
+    .network-diagram[data-capture="true"] .network-diagram__canvas {
+        background-image: none;
+    }
+
+    .network-diagram__toolbar {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.75rem;
+        border-bottom: 1px solid rgb(148 163 184 / 20%);
+    }
+
+    .network-diagram__toolbar button {
+        padding: 0.4rem 0.75rem;
+        border: 1px solid var(--diagram-button-border);
+        border-radius: 0.4rem;
+        background: var(--diagram-button-background);
+        color: var(--diagram-button-text);
+        cursor: pointer;
+        transition:
+                background-color 160ms ease,
+                border-color 160ms ease,
+                color 160ms ease;
+    }
+
+    .network-diagram__toolbar button:hover {
+        background: var(--diagram-button-background-hover);
+    }
+
+    .network-diagram__toolbar button:focus-visible,
+    .network-diagram__close:focus-visible {
+        outline: 2px solid var(--diagram-selection);
+        outline-offset: 2px;
+    }
+
+    /*noinspection ALL*/
+    .network-diagram__body {
+        --diagram-details-width: 22rem;
+
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        height: min(
+                var(--diagram-height),
+                var(--diagram-available-height, calc(100dvh - 8rem))
+        );
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .network-diagram__canvas {
+        position: relative;
+        z-index: 1;
+        width: 100%;
+        min-width: 0;
+        height: 100%;
+        min-height: 0;
+        background-color: var(--diagram-background);
+        background-image: radial-gradient(
+                circle,
+                var(--diagram-grid) 1px,
+                transparent 1px
+        );
+        background-size: 20px 20px;
+    }
+
+
+    .network-diagram__details {
+        position: absolute;
+        inset: 0 0 0 auto;
+        z-index: 10;
+        box-sizing: border-box;
+        width: min(var(--diagram-details-width), 100%);
+        min-width: 0;
+        min-height: 0;
+        height: 100%;
+        padding: 1.25rem;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color:
+                var(--diagram-scrollbar-thumb)
+                var(--diagram-scrollbar-track);
+        border-left: 1px solid var(--diagram-panel-border);
+        background: var(--diagram-panel-background);
+        color: var(--diagram-panel-text);
+        visibility: hidden;
+        pointer-events: none;
+        transform: translateX(100%);
+        will-change: transform;
+        contain: paint;
+        transition:
+                transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+                visibility 0s linear 320ms;
+    }
+
+    .network-diagram__details.is-open {
+        visibility: visible;
+        pointer-events: auto;
+        transform: translateX(0);
+        transition-delay: 0s;
+    }
+
+    .network-diagram__details::-webkit-scrollbar {
+        width: 0.7rem;
+    }
+
+    .network-diagram__details::-webkit-scrollbar-track {
+        background: var(--diagram-scrollbar-track);
+    }
+
+    .network-diagram__details::-webkit-scrollbar-thumb {
+        min-height: 2.5rem;
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background:
+                var(--diagram-scrollbar-thumb)
+                padding-box;
+    }
+
+    .network-diagram__details::-webkit-scrollbar-thumb:hover {
+        background:
+                var(--diagram-scrollbar-thumb-hover)
+                padding-box;
+    }
+
+    .network-diagram__details-header {
+        position: sticky;
+        top: -1.25rem;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin: -1.25rem -1.25rem 0;
+        padding: 1.25rem;
+        border-bottom: 1px solid var(--diagram-panel-border);
+        background: var(--diagram-panel-background);
+    }
+
+    .network-diagram__details h3 {
+        margin: 0;
+        color: var(--diagram-panel-text);
+    }
+
+    .network-diagram__close {
+        display: grid;
+        flex: 0 0 auto;
+        width: 2rem;
+        height: 2rem;
+        place-items: center;
+        border: 1px solid var(--diagram-panel-border);
+        border-radius: 0.4rem;
+        background: transparent;
+        color: var(--diagram-panel-text);
+        cursor: pointer;
+        font-size: 1rem;
+        line-height: 1;
+    }
+
+    .network-diagram__close:hover {
+        background: rgb(127 127 127 / 12%);
+    }
+
+    .network-diagram__details dl {
+        display: grid;
+        gap: 1rem;
+        margin: 1.25rem 0 0;
+    }
+
+    :global(.network-diagram__property) {
+        display: grid;
+        min-width: 0;
+        gap: 0.2rem;
+    }
+
+    :global(.network-diagram__property--ports) {
+        gap: 0.25rem;
+    }
+
+    :global(.network-diagram__property-label) {
+        margin: 0;
+        padding: 0;
+        color: var(--diagram-panel-muted);
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+
+    :global(.network-diagram__property-value) {
+        min-width: 0;
+        margin: 0;
+        padding: 0;
+        color: var(--diagram-panel-text);
+        font-size: 0.95rem;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    :global(.network-diagram__property--ports .network-diagram__property-value) {
+        line-height: normal;
+    }
+
+    :global(.network-diagram__table-scroll) {
+        box-sizing: border-box;
+        width: 100%;
+        max-width: 100%;
+        margin: 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        overscroll-behavior-inline: contain;
+        scrollbar-width: thin;
+        scrollbar-color:
+                var(--diagram-scrollbar-thumb)
+                var(--diagram-scrollbar-track);
+        border: 1px solid var(--diagram-panel-border);
+    }
+
+    :global(.network-diagram__ports-table) {
+        position: static;
+        box-sizing: border-box;
+        width: max-content;
+        min-width: 100%;
+        margin: 0;
+        border: 0;
+        border-collapse: separate;
+        border-spacing: 0;
+        font-size: 0.8rem;
+        line-height: 1.35;
+    }
+
+    :global(.network-diagram__ports-table thead),
+    :global(.network-diagram__ports-table th) {
+        position: static;
+        inset: auto;
+    }
+
+    :global(.network-diagram__ports-table th),
+    :global(.network-diagram__ports-table td) {
+        box-sizing: border-box;
+        padding: 0.45rem 0.5rem;
+        border: 0;
+        text-align: left;
+        white-space: nowrap;
+    }
+
+    :global(.network-diagram__ports-table th + th),
+    :global(.network-diagram__ports-table td + td) {
+        border-left: 1px solid var(--diagram-panel-border);
+    }
+
+    :global(.network-diagram__ports-table tbody td) {
+        border-top: 1px solid var(--diagram-panel-border);
+    }
+
+    :global(.network-diagram__ports-table th) {
+        color: var(--diagram-panel-muted);
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+
+    :global(.network-diagram__ports-table tbody tr:nth-child(even)) {
+        background: rgb(127 127 127 / 6%);
+    }
+
+    .network-diagram__description {
+        margin: 1.25rem 0 0;
+        color: var(--diagram-panel-text);
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    .network-diagram__details h4 {
+        margin: 1.5rem 0 0.65rem;
+        color: var(--diagram-panel-text);
+    }
+
+    .network-diagram__details ul {
+        margin: 0;
+        padding-left: 1.25rem;
+    }
+
+    .network-diagram__details li {
+        margin: 0.35rem 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    :global(.network-diagram__empty-state) {
+        margin-left: -1.25rem;
+        color: var(--diagram-panel-muted);
+        list-style: none;
+    }
+
+    @media (max-width: 700px) {
+        .network-diagram__canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .network-diagram__details {
+            inset: 0;
+            width: 100%;
+            max-height: none;
+            border-top: 0;
+            border-left: 0;
+            transition-duration: 260ms, 260ms;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .network-diagram__details {
+            transition: none;
+        }
+    }
+</style>

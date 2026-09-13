@@ -1,0 +1,947 @@
+---
+export const prerender = true;
+---
+
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Share a GNS3 network diagram | LabForger</title>
+    <meta
+            name="description"
+            content="Generate a shareable interactive LabForger network diagram and GitHub Markdown embed from a public Gist."
+    />
+</head>
+
+<body>
+<main class="network-upload">
+    <section class="network-upload__card">
+        <header class="network-upload__header">
+            <p class="network-upload__eyebrow">LabForger Network Graph</p>
+            <h1>Share your GNS3 network</h1>
+            <p>
+                Upload your <code>.gns3project</code> or <code>.gns3</code> file
+                to a public GitHub Gist, then paste the Gist URL below.
+            </p>
+        </header>
+
+        <form class="network-upload__form" data-network-share-form>
+            <label for="gist-url">Public GitHub Gist URL</label>
+
+            <div class="network-upload__input-row">
+                <input
+                        id="gist-url"
+                        name="gist-url"
+                        type="url"
+                        inputmode="url"
+                        autocomplete="url"
+                        spellcheck="false"
+                        placeholder="https://gist.github.com/username/gist-id"
+                        required
+                />
+
+                <button type="submit" data-submit-button>Generate diagram</button>
+            </div>
+
+            <p class="network-upload__hint">
+                The Gist must contain a <code>.gns3project</code> or
+                <code>.gns3</code> file.
+            </p>
+
+            <fieldset>
+                <legend>Preview theme</legend>
+
+                <label>
+                    <input
+                            type="radio"
+                            name="theme"
+                            value="dark"
+                            checked
+                    />
+                    Dark
+                </label>
+
+                <label>
+                    <input
+                            type="radio"
+                            name="theme"
+                            value="light"
+                    />
+                    Light
+                </label>
+            </fieldset>
+
+            <p
+                    class="network-upload__error"
+                    data-error
+                    role="alert"
+                    hidden
+            ></p>
+
+            <p
+                    class="network-upload__status"
+                    data-status
+                    role="status"
+                    aria-live="polite"
+                    hidden
+            >
+                Checking Gist…
+            </p>
+        </form>
+
+        <section class="network-upload__results" data-results hidden>
+            <h2>Your sharing links</h2>
+
+            <div class="network-upload__result">
+                <div class="network-upload__result-heading">
+                    <h3>Interactive diagram</h3>
+                    <a
+                            data-interactive-link
+                            target="_blank"
+                            rel="noopener noreferrer"
+                    >
+                        Open diagram
+                    </a>
+                </div>
+
+                <code data-interactive-url></code>
+            </div>
+
+            <div class="network-upload__result">
+                <div class="network-upload__result-heading">
+                    <div>
+                        <h3>GitHub Markdown</h3>
+                        <p>
+                            Paste this directly into a GitHub Discussion,
+                            issue, pull request or README.
+                        </p>
+                    </div>
+
+                    <button
+                            type="button"
+                            class="network-upload__copy"
+                            data-copy-markdown
+                    >
+                        Copy
+                    </button>
+                </div>
+
+                <pre><code data-markdown></code></pre>
+
+                <p
+                        class="network-upload__copy-status"
+                        data-copy-status
+                        aria-live="polite"
+                ></p>
+            </div>
+
+            <div class="network-upload__preview">
+                <div class="network-upload__result-heading">
+                    <div>
+                        <h3>Preview</h3>
+                        <p>Image preview for embeds and sharing</p>
+                    </div>
+                </div>
+
+                <div class="network-upload__preview-frame" data-preview-frame>
+                    <p class="network-upload__preview-status" data-preview-status>
+                        Loading preview…
+                    </p>
+
+                    <a
+                            data-preview-link
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            hidden
+                    >
+                        <img
+                                data-preview-image
+                                alt="Generated preview of the submitted GNS3 network"
+                                hidden
+                        />
+                    </a>
+                </div>
+            </div>
+        </section>
+    </section>
+</main>
+
+<script>
+    const form = document.querySelector<HTMLFormElement>(
+        "[data-network-share-form]",
+    );
+    const gistInput =
+        document.querySelector<HTMLInputElement>("#gist-url");
+    const errorElement =
+        document.querySelector<HTMLElement>("[data-error]");
+    const statusElement =
+        document.querySelector<HTMLElement>("[data-status]");
+    const submitButton =
+        document.querySelector<HTMLButtonElement>("[data-submit-button]");
+    const results =
+        document.querySelector<HTMLElement>("[data-results]");
+    const interactiveLink =
+        document.querySelector<HTMLAnchorElement>(
+            "[data-interactive-link]",
+        );
+    const interactiveUrl =
+        document.querySelector<HTMLElement>(
+            "[data-interactive-url]",
+        );
+    const markdownElement =
+        document.querySelector<HTMLElement>("[data-markdown]");
+    const copyButton =
+        document.querySelector<HTMLButtonElement>(
+            "[data-copy-markdown]",
+        );
+    const copyStatus =
+        document.querySelector<HTMLElement>("[data-copy-status]");
+    const previewLink =
+        document.querySelector<HTMLAnchorElement>(
+            "[data-preview-link]",
+        );
+    const previewImage =
+        document.querySelector<HTMLImageElement>(
+            "[data-preview-image]",
+        );
+    const previewStatus =
+        document.querySelector<HTMLElement>("[data-preview-status]");
+
+    let generatedMarkdown = "";
+    let validatedGistId: string | undefined;
+    let validationController: AbortController | undefined;
+
+    function setError(message?: string): void {
+        if (!errorElement) return;
+
+        errorElement.hidden = !message;
+        errorElement.textContent = message ?? "";
+    }
+
+    function setLoading(
+        isLoading: boolean,
+        message = "Checking Gist…",
+    ): void {
+        if (statusElement) {
+            statusElement.hidden = !isLoading;
+            statusElement.textContent = message;
+        }
+
+        if (submitButton) {
+            submitButton.disabled = isLoading;
+            submitButton.textContent = isLoading
+                ? "Checking…"
+                : "Generate diagram";
+        }
+    }
+
+    function resetPreview(): void {
+        if (previewImage) {
+            previewImage.hidden = true;
+            previewImage.removeAttribute("src");
+        }
+
+        if (previewLink) {
+            previewLink.hidden = true;
+        }
+
+        if (previewStatus) {
+            previewStatus.hidden = false;
+            previewStatus.textContent = "Loading preview…";
+        }
+    }
+
+    function extractGistId(value: string): string | undefined {
+        let url: URL;
+
+        try {
+            url = new URL(value);
+        } catch {
+            return undefined;
+        }
+
+        const hostname = url.hostname.toLowerCase();
+
+        if (
+            hostname !== "gist.github.com" &&
+            hostname !== "www.gist.github.com"
+        ) {
+            return undefined;
+        }
+
+        const pathParts = url.pathname
+            .split("/")
+            .filter(Boolean);
+
+        const candidate = pathParts.at(-1);
+
+        if (!candidate || !/^[a-f0-9]{20,64}$/i.test(candidate)) {
+            return undefined;
+        }
+
+        return candidate;
+    }
+
+    interface GitHubGistFile {
+        filename?: string | null;
+        type?: string | null;
+        language?: string | null;
+        raw_url?: string | null;
+        size?: number;
+        truncated?: boolean;
+        content?: string;
+    }
+
+    interface GitHubGistResponse {
+        files?: Record<string, GitHubGistFile>;
+    }
+
+    function looksLikeGns3Json(value: unknown): boolean {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+            return false;
+        }
+
+        const record = value as Record<string, unknown>;
+
+        // GNS3 project exports vary by version. Keep this deliberately
+        // lightweight: require JSON plus at least one recognisable
+        // project/topology field rather than duplicating the full parser.
+        return (
+            typeof record.name === "string" ||
+            typeof record.project_id === "string" ||
+            typeof record.version === "string" ||
+            Array.isArray(record.nodes) ||
+            Array.isArray(record.links) ||
+            (record.topology !== null &&
+                typeof record.topology === "object")
+        );
+    }
+
+    async function readGistFileContent(
+        file: GitHubGistFile,
+        signal: AbortSignal,
+    ): Promise<string | undefined> {
+        if (!file.truncated && typeof file.content === "string") {
+            return file.content;
+        }
+
+        if (!file.raw_url) return undefined;
+
+        const response = await fetch(file.raw_url, {
+            signal,
+            headers: {
+                Accept: "text/plain",
+            },
+        });
+
+        if (!response.ok) return undefined;
+        return await response.text();
+    }
+
+    async function validateGist(
+        gistId: string,
+        signal: AbortSignal,
+    ): Promise<{ valid: true } | { valid: false; message: string }> {
+        let response: Response;
+
+        try {
+            response = await fetch(
+                `https://api.github.com/gists/${encodeURIComponent(gistId)}`,
+                {
+                    signal,
+                    headers: {
+                        Accept: "application/vnd.github+json",
+                    },
+                },
+            );
+        } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") {
+                throw error;
+            }
+
+            return {
+                valid: false,
+                message:
+                    "Could not reach GitHub to validate this Gist. Check your connection and try again.",
+            };
+        }
+
+        if (response.status === 404) {
+            return {
+                valid: false,
+                message:
+                    "That public Gist could not be found. Check the URL and make sure the Gist is public.",
+            };
+        }
+
+        if (response.status === 403 || response.status === 429) {
+            return {
+                valid: false,
+                message:
+                    "GitHub temporarily refused the validation request, possibly because of rate limiting. Try again shortly.",
+            };
+        }
+
+        if (!response.ok) {
+            return {
+                valid: false,
+                message: `GitHub returned an error while validating this Gist (${response.status}).`,
+            };
+        }
+
+        const gist = (await response.json()) as GitHubGistResponse;
+        const files = Object.values(gist.files ?? {});
+        const gns3Files = files.filter((file) => {
+            const filename = file.filename?.toLowerCase() ?? "";
+            return (
+                filename.endsWith(".gns3") ||
+                filename.endsWith(".gns3project")
+            );
+        });
+
+        if (gns3Files.length === 0) {
+            return {
+                valid: false,
+                message:
+                    "This Gist does not contain a .gns3 or .gns3project file.",
+            };
+        }
+
+        // Validate the first matching file enough to catch renamed text,
+        // images, HTML, etc. The actual diagram route remains the source
+        // of truth for full GNS3 parsing.
+        const candidate = gns3Files[0];
+        const content = await readGistFileContent(candidate, signal);
+
+        if (!content) {
+            return {
+                valid: false,
+                message:
+                    "The GNS3 file in this Gist could not be read. Try re-uploading it to a new public Gist.",
+            };
+        }
+
+        let parsed: unknown;
+
+        try {
+            parsed = JSON.parse(content);
+        } catch {
+            return {
+                valid: false,
+                message:
+                    "The matching file is not valid JSON and does not appear to be a usable GNS3 project file.",
+            };
+        }
+
+        if (!looksLikeGns3Json(parsed)) {
+            return {
+                valid: false,
+                message:
+                    "The matching file does not appear to contain a valid GNS3 project structure.",
+            };
+        }
+
+        return { valid: true };
+    }
+
+    function selectedTheme(): "dark" | "light" {
+        const selected =
+            form?.querySelector<HTMLInputElement>(
+                'input[name="theme"]:checked',
+            )?.value;
+
+        return selected === "light" ? "light" : "dark";
+    }
+
+    function buildLinks(gistId: string): {
+        interactive: string;
+        image: string;
+        markdown: string;
+    } {
+        const theme = selectedTheme();
+        const origin = window.location.origin;
+
+        const interactive = new URL(
+            `/network/${encodeURIComponent(gistId)}`,
+            origin,
+        );
+        interactive.searchParams.set("theme", theme);
+
+        const image = new URL(
+            `/network/${encodeURIComponent(gistId)}/image.png`,
+            origin,
+        );
+        image.searchParams.set("w", "1600");
+        image.searchParams.set("h", "900");
+        image.searchParams.set("scale", "1");
+        image.searchParams.set("zoom", "1");
+        image.searchParams.set("fit", "1");
+        image.searchParams.set("theme", theme);
+
+        const markdown =
+            `[![Interactive GNS3 network diagram](${image.href})](${interactive.href})\n\n` +
+            `[Open the interactive network diagram](${interactive.href})`;
+
+        return {
+            interactive: interactive.href,
+            image: image.href,
+            markdown,
+        };
+    }
+
+    function showResults(gistId: string): void {
+        const links = buildLinks(gistId);
+
+        generatedMarkdown = links.markdown;
+
+        if (interactiveLink) {
+            interactiveLink.href = links.interactive;
+        }
+
+        if (interactiveUrl) {
+            interactiveUrl.textContent = links.interactive;
+        }
+
+        if (markdownElement) {
+            markdownElement.textContent = links.markdown;
+        }
+
+        if (previewLink) {
+            previewLink.href = links.interactive;
+        }
+
+        resetPreview();
+
+        if (previewImage) {
+            previewImage.onload = () => {
+                previewImage.hidden = false;
+
+                if (previewLink) previewLink.hidden = false;
+                if (previewStatus) previewStatus.hidden = true;
+            };
+
+            previewImage.onerror = () => {
+                previewImage.hidden = true;
+
+                if (previewLink) previewLink.hidden = true;
+                if (previewStatus) {
+                    previewStatus.hidden = false;
+                    previewStatus.textContent =
+                        "Preview could not be generated. The interactive diagram link is still available.";
+                }
+            };
+
+            previewImage.src = links.image;
+        }
+
+        if (copyStatus) {
+            copyStatus.textContent = "";
+        }
+
+        if (results) {
+            results.hidden = false;
+            results.scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+            });
+        }
+    }
+
+    form?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setError();
+
+        const value = gistInput?.value.trim() ?? "";
+        const gistId = extractGistId(value);
+
+        if (!gistId) {
+            if (results) results.hidden = true;
+            validatedGistId = undefined;
+            setLoading(false);
+
+            setError(
+                "Enter a valid public gist.github.com URL containing a hexadecimal Gist ID.",
+            );
+            return;
+        }
+
+        if (results) results.hidden = true;
+        generatedMarkdown = "";
+        validatedGistId = undefined;
+        validationController?.abort();
+        validationController = new AbortController();
+        setLoading(true, "Checking Gist for a GNS3 project…");
+
+        try {
+            const validation = await validateGist(
+                gistId,
+                validationController.signal,
+            );
+
+            if (!validation.valid) {
+                setError(validation.message);
+                return;
+            }
+
+            validatedGistId = gistId;
+            setLoading(true, "Generating diagram…");
+
+            // Let the status update paint before requesting the preview.
+            await new Promise<void>((resolve) => {
+                window.requestAnimationFrame(() => resolve());
+            });
+
+            showResults(gistId);
+        } catch (error) {
+            if (!(error instanceof DOMException && error.name === "AbortError")) {
+                setError(
+                    "The Gist could not be validated. Please try again.",
+                );
+            }
+        } finally {
+            setLoading(false);
+        }
+    });
+
+    form?.addEventListener("change", (event) => {
+        const target = event.target;
+
+        if (
+            target instanceof HTMLInputElement &&
+            target.name === "theme" &&
+            results &&
+            !results.hidden
+        ) {
+            const gistId = extractGistId(
+                gistInput?.value.trim() ?? "",
+            );
+
+            if (gistId && gistId === validatedGistId) {
+                showResults(gistId);
+            }
+        }
+    });
+
+    gistInput?.addEventListener("input", () => {
+        validationController?.abort();
+        validationController = undefined;
+        validatedGistId = undefined;
+        generatedMarkdown = "";
+        setError();
+        setLoading(false);
+
+        if (results) results.hidden = true;
+        resetPreview();
+    });
+
+    copyButton?.addEventListener("click", async () => {
+        if (!generatedMarkdown) return;
+
+        try {
+            await navigator.clipboard.writeText(generatedMarkdown);
+
+            if (copyStatus) {
+                copyStatus.textContent = "Copied to clipboard.";
+            }
+
+            copyButton.textContent = "Copied";
+
+            window.setTimeout(() => {
+                copyButton.textContent = "Copy";
+            }, 1_500);
+        } catch {
+            if (copyStatus) {
+                copyStatus.textContent =
+                    "Could not access the clipboard. Select and copy the code manually.";
+            }
+        }
+    });
+</script>
+</body>
+</html>
+
+<style>
+    :global(*) {
+        box-sizing: border-box;
+    }
+
+    :global(html) {
+        color-scheme: dark;
+        font-family:
+                Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+                "Segoe UI", sans-serif;
+        background: #0d1117;
+        color: #f0f6fc;
+    }
+
+    :global(body) {
+        min-width: 320px;
+        margin: 0;
+        background:
+                radial-gradient(circle at top, #17233a 0, transparent 42rem),
+                #0d1117;
+    }
+
+    .network-upload {
+        width: min(100% - 2rem, 58rem);
+        min-height: 100dvh;
+        margin-inline: auto;
+        padding-block: clamp(2rem, 6vw, 5rem);
+    }
+
+    .network-upload__card {
+        padding: clamp(1.25rem, 4vw, 2.5rem);
+        border: 1px solid #30363d;
+        border-radius: 1rem;
+        background: rgba(13, 17, 23, 0.92);
+        box-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.32);
+    }
+
+    .network-upload__header {
+        max-width: 45rem;
+    }
+
+    .network-upload__eyebrow {
+        margin: 0 0 0.5rem;
+        color: #58a6ff;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+        margin-top: 0;
+    }
+
+    h1 {
+        margin-bottom: 1rem;
+        font-size: clamp(2rem, 6vw, 3.5rem);
+        line-height: 1;
+    }
+
+    .network-upload__header > p:last-child {
+        color: #b1bac4;
+        font-size: 1.05rem;
+        line-height: 1.7;
+    }
+
+    code {
+        font-family:
+                "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono",
+                monospace;
+    }
+
+    .network-upload__form {
+        display: grid;
+        gap: 0.9rem;
+        margin-top: 2rem;
+    }
+
+    .network-upload__form > label,
+    legend {
+        font-weight: 700;
+    }
+
+    .network-upload__input-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.75rem;
+    }
+
+    input[type="url"] {
+        width: 100%;
+        min-height: 3rem;
+        padding: 0.75rem 0.9rem;
+        border: 1px solid #484f58;
+        border-radius: 0.55rem;
+        outline: none;
+        background: #010409;
+        color: inherit;
+        font: inherit;
+    }
+
+    input[type="url"]:focus {
+        border-color: #58a6ff;
+        box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.22);
+    }
+
+    button,
+    .network-upload__result-heading a {
+        min-height: 2.75rem;
+        padding: 0.7rem 1rem;
+        border: 1px solid #2f81f7;
+        border-radius: 0.55rem;
+        background: #238636;
+        color: #fff;
+        font: inherit;
+        font-weight: 700;
+        text-decoration: none;
+        cursor: pointer;
+    }
+
+    button:hover,
+    .network-upload__result-heading a:hover {
+        filter: brightness(1.1);
+    }
+
+    button:disabled {
+        cursor: wait;
+        filter: saturate(0.65);
+        opacity: 0.75;
+    }
+
+    .network-upload__hint,
+    .network-upload__result-heading p {
+        margin: 0;
+        color: #8c959f;
+        font-size: 0.9rem;
+    }
+
+    fieldset {
+        display: flex;
+        gap: 1.25rem;
+        margin: 0.5rem 0 0;
+        padding: 0;
+        border: 0;
+    }
+
+    fieldset label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .network-upload__error {
+        margin: 0;
+        padding: 0.75rem;
+        border: 1px solid #f85149;
+        border-radius: 0.5rem;
+        background: rgba(248, 81, 73, 0.12);
+        color: #ffb4ae;
+    }
+
+    .network-upload__status {
+        margin: 0;
+        color: #8c959f;
+        font-size: 0.9rem;
+    }
+
+    .network-upload__error[hidden],
+    .network-upload__status[hidden],
+    .network-upload__results[hidden],
+    .network-upload__preview [hidden] {
+        display: none !important;
+    }
+
+    .network-upload__results {
+        display: grid;
+        gap: 1.5rem;
+        margin-top: 2.5rem;
+        padding-top: 2rem;
+        border-top: 1px solid #30363d;
+    }
+
+    .network-upload__result,
+    .network-upload__preview {
+        padding: 1rem;
+        border: 1px solid #30363d;
+        border-radius: 0.75rem;
+        background: #161b22;
+    }
+
+    .network-upload__result-heading {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.85rem;
+    }
+
+    .network-upload__result-heading h3 {
+        margin-bottom: 0.25rem;
+    }
+
+    .network-upload__result > code {
+        display: block;
+        overflow-wrap: anywhere;
+        color: #79c0ff;
+    }
+
+    pre {
+        max-width: 100%;
+        margin: 0;
+        padding: 1rem;
+        overflow-x: auto;
+        border-radius: 0.5rem;
+        background: #010409;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+
+    .network-upload__copy {
+        flex: 0 0 auto;
+        min-height: auto;
+        background: #21262d;
+        border-color: #484f58;
+    }
+
+    .network-upload__copy-status {
+        min-height: 1.25rem;
+        margin: 0.6rem 0 0;
+        color: #7ee787;
+        font-size: 0.9rem;
+    }
+
+    .network-upload__preview-frame {
+        display: grid;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        place-items: center;
+        overflow: hidden;
+        border: 1px solid #30363d;
+        border-radius: 0.5rem;
+        background: #010409;
+    }
+
+    .network-upload__preview-frame a {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+
+    .network-upload__preview img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+
+    .network-upload__preview-status {
+        margin: 0;
+        padding: 1rem;
+        color: #8c959f;
+        text-align: center;
+        line-height: 1.5;
+    }
+
+    @media (max-width: 42rem) {
+        .network-upload__input-row {
+            grid-template-columns: 1fr;
+        }
+
+        .network-upload__result-heading {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .network-upload__result-heading a,
+        .network-upload__copy {
+            width: 100%;
+            text-align: center;
+        }
+    }
+</style>
