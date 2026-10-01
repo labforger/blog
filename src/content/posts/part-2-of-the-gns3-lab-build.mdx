@@ -1,0 +1,316 @@
+---
+title: "Part 2 of the GNS3 Lab Build: Setting Up the GNS3 Server"
+description:
+date: 2026-07-28
+time:
+tags:
+  - Homelab
+  - Networking
+  - Proxmox
+  - GNS3
+hideCoverImage: false
+hideTOC: true
+targetKeyword: GNS3
+draft: false
+
+credits:
+    authors:
+        - name: "Anthony Provenza"
+          url: "https://www.linkedin.com/in/anthonyprovenza/"
+    editors:
+        - name: "Jade Rose"
+          url: "https://www.linkedin.com/in/jade-rosey/"
+---
+import Cite from "../../components/Cite.astro";
+import References from "../../components/References.astro";
+import { resetCitations } from "../../utils/citeRegistry";
+
+{resetCitations()}
+
+In the last post, I built the physical server for GNS3.
+
+Well, "built" might be a bit strong. More accurately, I cleaned it, threw in some overkill networking parts, convinced myself that this was still a good idea, and installed Proxmox on it.
+
+At that point, I had a server. A Proxmox server.
+
+So the plan from here was simple: create the VM, install the GNS3 server, connect the desktop client, and start building actual labs.
+
+Simple enough, right?
+
+Of course, I got distracted almost immediately.
+
+
+## Poking Around in Proxmox
+
+The first thing I did after installing Proxmox was start clicking around at the different menus and submenus.
+
+While doing this, I came across two entries on my sidebar: `local` and `local-lvm`.
+
+I'd never noticed these before, but I was immediately a bit confused. Especially because I had a 256 GB SSD for the OS and Proxmox was showing them as roughly 70 GB and 150 GB respectively.
+
+Considering my storage was now split across two separate areas, this warranted some digging.
+
+After a bit of research, I found out that `local` is the Proxmox storage for ISO files, backups and templates. `local-lvm` is where the virtual disks for VMs live.
+
+Technically, `local-lvm` uses something called `LVM-thin`.
+
+Now I could spend some time explaining that, and how it's better for VM storage.
+
+But in reality, neither of us came here for a storage lecture.
+
+The important part was simple: ISO files are stored in `local` and VM disks are in `local-lvm`.
+
+
+## Missing NICs
+
+So now it was time to create the VM.
+
+Or so I thought.
+
+I went to create the VM, opened the network tab, and discovered that there was only one bridge available.
+
+So I immediately went to the Proxmox shell and checked if all my physical NICs were showing up.
+
+```console
+root@pve01:~# ip address
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    [...]
+2: nic1: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    [...]
+3: nic2: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    [...]
+4: nic0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel master vmbr0 state UP group default qlen 1000
+    [...]
+5: nic3: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    [...]
+6: nic4: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    [...]
+7: vmbr0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    [...]
+```
+
+So good news: Proxmox could see all of the network interfaces.
+
+Bad news: most of them were marked as down.
+
+The original port, `nic0`, looked normal. It was up, had link, and was clearly the management port I'd been using so far.
+
+The new ports were a different story. They were showing up, but they were marked as `DOWN`, meaning Proxmox knew they were there but were not currently active.
+
+At this point, I decided to try a quick DHCP request. It's hard to do much networking without an IP, and I was really trying to avoid manually configuring one.
+
+```console
+root@pve01:~# dhclient
+Error: ipv4: Address already assigned.
+```
+
+At first, I thought I had broken something.
+
+Later, I realised that it probably meant the interface I had asked DHCP to configure already had an IP address.
+
+In other words, I'd done what I wanted, seen the error, panicked, and then realised everything was probably fine.
+
+```console
+root@pve01:~# ip address
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    [...]
+2: nic1: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
+    [...]
+3: nic2: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
+    [...]
+4: nic0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel master vmbr0 state UP group default qlen 1000
+    [...]
+5: nic3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    [...]
+6: nic4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    [...]
+7: vmbr0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    [...]
+```
+
+This was looking a lot better.
+
+The two ports connected to the switch, `nic3` and `nic4`, were now marked as `UP` and `LOWER_UP`, which meant they had an active link.
+
+The other two ports, `nic1` and `nic2`, were marked as `NO-CARRIER` which meant they didn't have an active link. Considering I hadn't plugged any cables into them, it's exactly what I was expecting.
+
+So at this point, the two NICs were connected, active, and visible to Proxmox.
+
+Except there was still one problem.
+
+I couldn't use them when creating a new VM.
+
+
+## Building Bridges
+
+In Proxmox, a `vmbr` is a Linux bridge. The easiest way I've understood it is to think of it like a virtual switch.
+
+More specifically, it operates at Layer 2 and forwards Ethernet frames, meaning multiple VMs can share a single physical interface.
+
+If I wanted my GNS3 VM to use one of the new physical ports, I'd have to create a new bridge and attach it to that interface.
+
+So in Proxmox, I created a new bridge, assigned it to `nic4`, and now it showed up when creating new VMs.
+
+I also considered removing `vmbr0` from Proxmox, so I could keep `nic0` purely as my management port.
+
+Long term, that would probably be the cleanest solution. In reality, knowing my luck, I'll accidentally lock myself out of the whole server and have to learn Proxmox networking from the shell.
+
+Definitely not my idea of fun.
+
+
+## Creating the VM
+
+Now that everything was set up, I tried making the VM again. I gave it the name `GNS3` and the ID `300`. I left most settings as their defaults except the following:
+
+| Setting        | Changed from    | Changed to |
+|----------------|-----------------|------------|
+| Disk size      | `32 GB`         | `64 GB`    |
+| CPU cores      | `1`             | `4`        |
+| CPU type       | `x86-64-v2-AES` | `host`     |
+| Memory         | `2048 MB`       | `8192 MB`  |
+| Network bridge | `vmbr0`         | `vmbr1`    |
+
+For this project, I chose to install Ubuntu Server. I'm sure there are probably lighter distros to choose from, but honestly, I'm most familiar with Ubuntu.
+
+I wish there was a more technical reason for this choice, but nope. Purely personal preference.
+
+The OS installer was fairly simple and I just followed the instructions to create an account and boot into the shell. During the install, I decided to install `OpenSSH` so I could access it remotely.
+
+I also took the opportunity to assign a DHCP reservation and create a local DNS record of `gns3.home.labforger.com`, so I could SSH into the VM using that domain.
+
+
+## Installing GNS3 Server
+
+Now it was time to install the GNS3 server on the VM and I had no idea where to even start.
+
+I searched around and found [this guide](https://gns3.com/set-up-and-connect-a-remote-gns3-server-for-collaborative-labbing) for installing GNS3 on Ubuntu, so I followed that and managed to get it installed successfully.
+
+The guide said to run:
+
+```bash
+lab@gns3:~$ sudo systemctl start gns3
+```
+
+So I did.
+
+```console
+Failed to start gns3.service: Unit gns3.service not found.
+```
+
+Well that's not what happened in the guide.
+
+This meant I'd reached the unfortunate point where I had to actually think for myself.
+
+I started by checking whether the GNS3 server had actually been installed
+
+```console
+lab@gns3:~$ which gns3server
+/usr/bin/gns3server
+```
+
+So this confirmed the server existed but not in the nice system service way I was hoping for.
+
+Eventually, I settled on running it directly:
+
+```console
+lab@gns3:~$ gns3server --host 0.0.0.0 --port 3080
+No configuration file could be found or read
+2026-07-09 14:19:04 INFO run.py:218 GNS3 server version 2.2.59
+[...]
+```
+
+And that worked.
+
+I did consider spending hours trying to make it work as a system service.
+
+Then I remembered one great detail: I don't have to.
+
+Would running it as a system service be cleaner? Probably.
+
+Was that the sort of thing I actually wanted to learn that day? Absolutely not.
+
+I wanted to build networks, break them and struggle to fix them, whilst convincing myself it's educational.
+
+So for now, running `gns3server` directly was good enough. And I could always turn it into a proper service if it starts annoying me.
+
+
+## Installing GNS3 Client
+
+By now, you've probably started to notice the format of these posts: I have an idea, I start working on it, something breaks, and I either fix it or find a workaround.
+
+Then I pretend that was the plan all along.
+
+Unfortunately, installing the GNS3 client on Windows was extremely uneventful.
+
+I downloaded the installer, ran it, clicked through the wizard, and it worked.
+
+Great outcome. Terrible content.
+
+Once the client was installed, I added my remote server using the local DNS name I created earlier.
+
+The client connected, and just like that I had a working GNS3 server.
+
+For the first time in this project, all the layers were finally working together.
+
+So I created a new project, and realised I had one more problem to solve.
+
+I had no appliances to run inside it.
+
+
+## Adding My First Appliance
+
+To absolutely nobody's surprise, I don't have much experience with networking yet.
+
+After all, the whole point of this GNS3 setup is that I can learn and improve my networking.
+
+So with that in mind, I decided to start with the only firewall I've worked with before: OPNsense.
+
+I Googled "OPNsense GNS3" and found a link to install it directly.
+
+Jackpot!
+
+Well, at least that's what I thought.
+
+I had downloaded a `.gns3a` file, dragged it into GNS3, and immediately learned that the appliance file isn't always the full appliance.
+
+In this case, the `.gns3a` file was more like a template for an appliance, but I still had to provide my own disk image for it.
+
+So after not reading the instructions properly the first couple of times, I eventually downloaded the right file. After adding that, OPNsense finally appeared as a usable node.
+
+I'll admit, this felt like a bigger moment than it probably should have.
+
+Until then, I technically had a working GNS3 server, but it was just an empty workspace. Adding OPNsense made it feel like I could actually start building something.
+
+Plus, I have a lot of experience working with OPNsense, so seeing that familiar installer made me realise this was basically like working with physical hardware.
+
+Just a lot more convenient.
+
+
+## Testing It Worked
+
+Before calling the project finished, I wanted to make sure everything was usable.
+
+So I added OPNsense to a new project, connected its WAN side to a NAT gateway, and connected its LAN side to a small switch with a couple of VPCS nodes.
+
+The goal was simple: OPNsense should get a WAN connection, act as the firewall, and give the client something to connect to.
+
+And somehow, it worked.
+
+I had an OPNsense appliance on my GNS3 server, running inside an Ubuntu VM, hosted on Proxmox, using a dedicated bridge, with my Windows desktop connected as the client.
+
+Honestly, writing it all down makes me realise the ridiculous number of layers I used to achieve this, especially when I originally described it to myself as "just installing GNS3".
+
+But it worked. And that's what matters most.
+
+
+## Final Thoughts
+
+That brings the GNS3 server build to a close.
+
+Part 1 was the hardware and Proxmox setup. Part 2 was turning that Proxmox host into an actual working GNS3 server, connecting from the desktop client, and adding the first appliance.
+
+It wasn't perfectly smooth, but I definitely learnt a lot.
+
+More importantly, I now have a working GNS3 setup that I can use for future labs.
+
+So now the server is built, I can finally start building the big networks I've been daydreaming of.
